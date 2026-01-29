@@ -1,5 +1,6 @@
 "use client";
 import React from "react";
+import { useUser } from "@clerk/nextjs";
 import { useModal } from "../../hooks/useModal";
 import { Modal } from "../ui/modal";
 import Button from "../ui/button/Button";
@@ -9,6 +10,7 @@ import Image from "next/image";
 
 
 export default function UserMetaCard() {
+  const { isLoaded, user } = useUser();
   const { isOpen, openModal, closeModal } = useModal();
   const handleSave = () => {
     // Handle save logic here
@@ -24,13 +26,13 @@ export default function UserMetaCard() {
               <Image
                 width={80}
                 height={80}
-                src="/images/user/owner.jpg"
-                alt="user"
+                src={isLoaded && user?.imageUrl ? user.imageUrl : "/images/user/owner.jpg"}
+                alt={user?.fullName || "user"}
               />
             </div>
             <div className="order-3 xl:order-2">
               <h4 className="mb-2 text-lg font-semibold text-center text-gray-800 dark:text-white/90 xl:text-left">
-                Musharof Chowdhury
+                {isLoaded && user ? (user.fullName || user.firstName || user.username || "User") : "Loading..."}
               </h4>
               <div className="flex flex-col items-center gap-1 text-center xl:flex-row xl:gap-3 xl:text-left">
                 <p className="text-sm text-gray-500 dark:text-gray-400">
@@ -192,17 +194,17 @@ export default function UserMetaCard() {
                 <div className="grid grid-cols-1 gap-x-6 gap-y-5 lg:grid-cols-2">
                   <div className="col-span-2 lg:col-span-1">
                     <Label>First Name</Label>
-                    <Input type="text" defaultValue="Musharof" />
+                    <Input type="text" defaultValue={isLoaded && user?.firstName ? user.firstName : ""} />
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
                     <Label>Last Name</Label>
-                    <Input type="text" defaultValue="Chowdhury" />
+                    <Input type="text" defaultValue={isLoaded && user?.lastName ? user.lastName : ""} />
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
                     <Label>Email Address</Label>
-                    <Input type="text" defaultValue="randomuser@pimjo.com" />
+                    <Input type="text" defaultValue={isLoaded && user?.primaryEmailAddress?.emailAddress ? user.primaryEmailAddress.emailAddress : ""} />
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
