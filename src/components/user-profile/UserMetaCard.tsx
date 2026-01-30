@@ -1,6 +1,6 @@
 "use client";
 import React, { useState, useRef, useEffect } from "react";
-import { useUser } from "@clerk/nextjs";
+import { useUser, useReverification } from "@clerk/nextjs";
 import { useModal } from "../../hooks/useModal";
 import { Modal } from "../ui/modal";
 import Button from "../ui/button/Button";
@@ -18,14 +18,41 @@ export default function UserMetaCard() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
+  const [email, setEmail] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [emailId, setEmailId] = useState<string | null>(null);
+  const [verificationCode, setVerificationCode] = useState("");
+  const [emailStep, setEmailStep] = useState<"edit" | "verify">("edit");
+  const [isSendingCode, setIsSendingCode] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [emailBeingVerified, setEmailBeingVerified] = useState<string>(""); // Store email that code was sent to
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // Use reverification hook for sensitive email changes
+  const changePrimaryEmail = useReverification((emailAddressId: string) =>
+    user?.update({ primaryEmailAddressId: emailAddressId })
+  );
 
   useEffect(() => {
     if (isLoaded && user) {
       setFirstName(user.firstName || "");
       setLastName(user.lastName || "");
+      setEmail(user.primaryEmailAddress?.emailAddress || "");
+      setNewEmail(user.primaryEmailAddress?.emailAddress || "");
     }
   }, [isLoaded, user]);
+
+  // Reset email verification state when modal closes
+  useEffect(() => {
+    if (!isOpen) {
+      setEmailStep("edit");
+      setNewEmail(user?.primaryEmailAddress?.emailAddress || "");
+      setEmailId(null);
+      setVerificationCode("");
+      setEmailBeingVerified("");
+      setAlert(null);
+    }
+  }, [isOpen, user]);
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -46,6 +73,200 @@ export default function UserMetaCard() {
     }
   };
 
+  // STEP 3: Send verification code to new email
+  const handleSendCode = async () => {
+    if (!user || !isLoaded || !newEmail.trim()) {
+      setAlert({ variant: "error", message: "Please enter a valid email address." });
+      return;
+    }
+
+    const emailValue = newEmail.trim();
+    const currentEmail = user.primaryEmailAddress?.emailAddress || "";
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(emailValue)) {
+      setAlert({ variant: "error", message: "Please enter a valid email address." });
+      return;
+    }
+
+    // Check if email is the same as current
+    if (emailValue === currentEmail) {
+      setAlert({ variant: "error", message: "This is already your primary email address." });
+      return;
+    }
+
+    setIsSendingCode(true);
+    setAlert(null);
+
+    try {
+      // Check if email already exists in user's email addresses
+      let emailAddress = user.emailAddresses.find(
+        (emailAddr) => emailAddr.emailAddress === emailValue
+      );
+
+      if (!emailAddress) {
+        // 1. Add email to Clerk (unverified)
+        emailAddress = await user.createEmailAddress({
+          email: emailValue,
+        });
+        // Reload user to get the newly created email address
+        await user.reload();
+        // Find it again after reload
+        emailAddress = user.emailAddresses.find(
+          (emailAddr) => emailAddr.emailAddress === emailValue
+        );
+      }
+
+      if (!emailAddress) {
+        throw new Error("Failed to create email address");
+      }
+
+      // 2. Send verification code
+      await emailAddress.prepareVerification({
+        strategy: "email_code",
+      });
+
+      setEmailId(emailAddress.id);
+      setEmailBeingVerified(emailValue); // Store the email we're verifying
+      setEmailStep("verify");
+      setAlert({ 
+        variant: "success", 
+        message: "✅ Verification code sent to " + emailValue + ". Please check your inbox and enter the code below." 
+      });
+    } catch (error: any) {
+      console.error("Error sending verification code:", error);
+      const errorMessage = error?.errors?.[0]?.message || error?.message || "Failed to send verification code. Please try again.";
+      setAlert({ variant: "error", message: errorMessage });
+    } finally {
+      setIsSendingCode(false);
+    }
+  };
+
+  // STEP 5: Verify code and make email primary
+  const handleVerify = async () => {
+    if (!user || !isLoaded || !emailId || !verificationCode.trim()) {
+      setAlert({ variant: "error", message: "Please enter the verification code." });
+      return;
+    }
+
+    setIsVerifying(true);
+    setAlert(null);
+
+    try {
+      // Find the email address
+      const emailAddress = user.emailAddresses.find(
+        (e) => e.id === emailId
+      );
+
+      if (!emailAddress) {
+        throw new Error("Email address not found. Please try again.");
+      }
+
+      // 1. Try to verify email, but handle "already verified" and "reverification required" errors gracefully
+      try {
+        await emailAddress.attemptVerification({ code: verificationCode.trim() });
+      } catch (verifyError: any) {
+        const errorMessage = verifyError?.errors?.[0]?.message || verifyError?.message || "";
+        const lowerErrorMessage = errorMessage.toLowerCase();
+        
+        // Check if error is "already verified" - email is already verified, skip verification
+        if (lowerErrorMessage.includes("already verified")) {
+          console.log("Email is already verified, setting as primary directly");
+        } 
+        // Check if error is "reverification required" - user needs to reverify their session
+        else if (lowerErrorMessage.includes("reverification required") || lowerErrorMessage.includes("reverification")) {
+          setAlert({ 
+            variant: "error", 
+            message: "Security verification required. Please sign out and sign in again, then try changing your email." 
+          });
+          setIsVerifying(false);
+          return;
+        } else {
+          // Some other verification error, throw it
+          throw verifyError;
+        }
+      }
+
+      // 2. Set as primary email using reverification wrapper
+      // This handles reverification automatically when required
+      if (changePrimaryEmail) {
+        await changePrimaryEmail(emailAddress.id);
+      } else {
+        // Fallback if reverification hook is not available
+        await user.update({
+          primaryEmailAddressId: emailAddress.id,
+        });
+      }
+
+      // 3. (Optional) Remove old email if it exists and is not primary
+      const oldPrimaryEmail = user.primaryEmailAddress;
+      if (oldPrimaryEmail && oldPrimaryEmail.id !== emailAddress.id) {
+        try {
+          await oldPrimaryEmail.destroy();
+        } catch (destroyError) {
+          // Ignore errors when destroying old email (might be needed for recovery)
+          console.log("Could not remove old email (this is okay):", destroyError);
+        }
+      }
+
+      // 4. Reload user to sync changes
+      await user.reload();
+
+      // Update local state
+      setEmail(user.primaryEmailAddress?.emailAddress || newEmail);
+      setEmailStep("edit");
+      setVerificationCode("");
+      setEmailId(null);
+
+      setAlert({ 
+        variant: "success", 
+        message: "Email updated successfully! Your new email address is now active." 
+      });
+
+      // Close modal after a short delay
+      setTimeout(() => {
+        closeModal();
+        setAlert(null);
+      }, 2000);
+    } catch (error: any) {
+      console.error("Error verifying email:", error);
+      const errorMessage = error?.errors?.[0]?.message || error?.message || "Invalid verification code. Please try again.";
+      setAlert({ variant: "error", message: errorMessage });
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleResendCode = async () => {
+    if (!user || !emailId) return;
+    
+    setIsSendingCode(true);
+    setAlert(null);
+
+    try {
+      const emailAddress = user.emailAddresses.find(
+        (e) => e.id === emailId
+      );
+
+      if (emailAddress) {
+        await emailAddress.prepareVerification({
+          strategy: "email_code",
+        });
+        setAlert({ 
+          variant: "success", 
+          message: "✅ Verification code resent to " + (emailAddress.emailAddress || newEmail) + ". Please check your inbox." 
+        });
+      }
+    } catch (error: any) {
+      console.error("Error resending code:", error);
+      const errorMessage = error?.errors?.[0]?.message || error?.message || "Failed to resend code. Please try again.";
+      setAlert({ variant: "error", message: errorMessage });
+    } finally {
+      setIsSendingCode(false);
+    }
+  };
+
   const handleSave = async () => {
     if (!user || !isLoaded) return;
 
@@ -56,6 +277,20 @@ export default function UserMetaCard() {
       const file = fileInputRef.current?.files?.[0];
       const firstNameValue = firstName.trim();
       const lastNameValue = lastName.trim();
+      const currentEmail = user.primaryEmailAddress?.emailAddress || "";
+      const emailValue = newEmail.trim();
+
+      // Check if email is being changed
+      if (emailValue && emailValue !== currentEmail) {
+        // Email is being changed - trigger verification flow
+        setIsSaving(false);
+        try {
+          await handleSendCode();
+        } catch (error) {
+          // Error already handled in handleSendCode
+        }
+        return; // Don't proceed with other updates until email is verified
+      }
 
       // Update profile image if a new one is selected
       if (file) {
@@ -69,7 +304,8 @@ export default function UserMetaCard() {
           lastName: lastNameValue || undefined,
         });
       }
-
+      
+      // Show success message if we get here (no errors occurred)
       setAlert({ variant: "success", message: "Profile updated successfully!" });
       
       // Close modal after a short delay
@@ -85,10 +321,20 @@ export default function UserMetaCard() {
       }, 1500);
     } catch (error: any) {
       console.error("Error updating profile:", error);
-      setAlert({
-        variant: "error",
-        message: error?.errors?.[0]?.message || "Failed to update profile. Please try again.",
-      });
+      const errorMessage = error?.errors?.[0]?.message || error?.message || "Failed to update profile. Please try again.";
+      
+      // Handle specific email errors
+      if (errorMessage.toLowerCase().includes("email") || errorMessage.toLowerCase().includes("verification")) {
+        setAlert({
+          variant: "error",
+          message: errorMessage,
+        });
+      } else {
+        setAlert({
+          variant: "error",
+          message: errorMessage,
+        });
+      }
       setIsSaving(false);
     }
   };
@@ -351,7 +597,71 @@ export default function UserMetaCard() {
 
                   <div className="col-span-2 lg:col-span-1">
                     <Label>Email Address</Label>
-                    <Input type="text" defaultValue={isLoaded && user?.primaryEmailAddress?.emailAddress ? user.primaryEmailAddress.emailAddress : ""} />
+                    {emailStep === "edit" ? (
+                      <div className="space-y-2">
+                        <div>
+                          <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                            Current: <span className="font-medium">{user?.primaryEmailAddress?.emailAddress || "No email"}</span>
+                          </p>
+                          <Input 
+                            type="email" 
+                            value={newEmail}
+                            onChange={(e) => setNewEmail(e.target.value)}
+                            placeholder="Enter your new email address"
+                            disabled={isSendingCode || isSaving}
+                          />
+                        </div>
+                        {newEmail !== (user?.primaryEmailAddress?.emailAddress || "") && newEmail.trim() && (
+                          <p className="text-xs text-amber-600 dark:text-amber-400">
+                            ⚠️ Click "Save Changes" to send verification code to this email
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                          <p className="text-sm text-blue-800 dark:text-blue-300 font-medium mb-1">
+                            📧 Verification Code Sent
+                          </p>
+                          <p className="text-xs text-blue-600 dark:text-blue-400">
+                            Code sent to: <span className="font-medium">{emailBeingVerified || newEmail}</span>
+                          </p>
+                          <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                            Please check your inbox and enter the 6-digit code below.
+                          </p>
+                        </div>
+                        <Input 
+                          type="text" 
+                          value={verificationCode}
+                          onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="Enter 6-digit verification code"
+                          disabled={isVerifying}
+                          className="text-center text-lg tracking-widest font-mono"
+                        />
+                        <div className="flex items-center justify-between">
+                          <button
+                            type="button"
+                            onClick={handleResendCode}
+                            disabled={isSendingCode}
+                            className="text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 disabled:opacity-50"
+                          >
+                            {isSendingCode ? "Sending..." : "Resend Code"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEmailStep("edit");
+                              setVerificationCode("");
+                              setEmailId(null);
+                              setAlert(null);
+                            }}
+                            className="text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+                          >
+                            ← Change email
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
@@ -371,17 +681,27 @@ export default function UserMetaCard() {
                 size="sm" 
                 variant="outline" 
                 onClick={closeModal}
-                disabled={isSaving}
+                disabled={isSaving || isVerifying || isSendingCode}
               >
                 Close
               </Button>
-              <Button 
-                size="sm" 
-                onClick={handleSave}
-                disabled={isSaving || !isLoaded}
-              >
-                {isSaving ? "Saving..." : "Save Changes"}
-              </Button>
+              {emailStep === "verify" ? (
+                <Button 
+                  size="sm" 
+                  onClick={handleVerify}
+                  disabled={isVerifying || !verificationCode.trim() || !isLoaded}
+                >
+                  {isVerifying ? "Verifying..." : "Verify & Save"}
+                </Button>
+              ) : (
+                <Button 
+                  size="sm" 
+                  onClick={handleSave}
+                  disabled={isSaving || !isLoaded || isSendingCode}
+                >
+                  {isSaving ? "Saving..." : "Save Changes"}
+                </Button>
+              )}
             </div>
           </form>
         </div>

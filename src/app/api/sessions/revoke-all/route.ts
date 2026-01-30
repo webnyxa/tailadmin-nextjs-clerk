@@ -36,7 +36,17 @@ export async function POST() {
 
       if (response.ok) {
         const data = await response.json();
-        sessions = Array.isArray(data) ? data : [];
+        
+        // Handle different response formats
+        if (Array.isArray(data)) {
+          sessions = data;
+        } else if (data?.data && Array.isArray(data.data)) {
+          sessions = data.data;
+        } else if (data?.sessions && Array.isArray(data.sessions)) {
+          sessions = data.sessions;
+        }
+        
+        console.log(`📊 Found ${sessions.length} total sessions to revoke for user ${userId}`);
       } else {
         const errorData = await response.text();
         console.error("Clerk API error:", response.status, errorData);
@@ -54,28 +64,46 @@ export async function POST() {
     }
 
     // Revoke all sessions using Clerk Backend API
+    // We revoke ALL sessions regardless of status to ensure complete sign-out
     if (sessions.length > 0) {
-      const revokePromises = sessions.map(async (session: any) => {
-        try {
-          const revokeResponse = await fetch(
-            `https://api.clerk.com/v1/sessions/${session.id}/revoke`,
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${CLERK_SECRET_KEY}`,
-                "Content-Type": "application/json",
-              },
+      const revokeResults = await Promise.allSettled(
+        sessions.map(async (session: any) => {
+          try {
+            const revokeResponse = await fetch(
+              `https://api.clerk.com/v1/sessions/${session.id}/revoke`,
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${CLERK_SECRET_KEY}`,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+            
+            if (!revokeResponse.ok) {
+              const errorText = await revokeResponse.text();
+              console.error(`Failed to revoke session ${session.id}:`, revokeResponse.status, errorText);
+              return { success: false, sessionId: session.id };
             }
-          );
-          return revokeResponse.ok;
-        } catch (error) {
-          console.error(`Error revoking session ${session.id}:`, error);
-          return false;
-        }
-      });
+            
+            return { success: true, sessionId: session.id };
+          } catch (error) {
+            console.error(`Error revoking session ${session.id}:`, error);
+            return { success: false, sessionId: session.id };
+          }
+        })
+      );
       
-      await Promise.all(revokePromises);
-      console.log(`Revoked ${sessions.length} sessions for user ${userId}`);
+      const successful = revokeResults.filter(r => r.status === 'fulfilled' && r.value.success).length;
+      const failed = revokeResults.length - successful;
+      
+      console.log(`✅ Revoked ${successful} sessions for user ${userId}${failed > 0 ? ` (${failed} failed)` : ''}`);
+      
+      if (failed > 0) {
+        console.warn(`⚠️ Some sessions failed to revoke. This might be normal if they were already revoked.`);
+      }
+    } else {
+      console.log(`ℹ️ No sessions found to revoke for user ${userId}`);
     }
 
     return NextResponse.json({ success: true });

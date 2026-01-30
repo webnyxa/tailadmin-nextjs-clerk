@@ -63,7 +63,16 @@ export default function UserSecurityCard() {
 
   useEffect(() => {
     if (isSessionsModalOpen && user) {
+      // Fetch sessions when modal opens
       fetchSessions();
+      
+      // Also refresh after a short delay to ensure we get the latest data
+      // This helps if sessions were recently revoked
+      const refreshTimeout = setTimeout(() => {
+        fetchSessions();
+      }, 500);
+      
+      return () => clearTimeout(refreshTimeout);
     }
   }, [isSessionsModalOpen, user]);
 
@@ -156,6 +165,14 @@ export default function UserSecurityCard() {
 
       if (response.ok) {
         setAlert({ variant: "success", message: "Signed out from all devices successfully!" });
+        
+        // Refresh sessions list to show updated count (should be 0 or 1)
+        // Wait a moment for Clerk API to update session statuses
+        setTimeout(() => {
+          fetchSessions();
+        }, 300);
+        
+        // Sign out after showing success message
         setTimeout(async () => {
           await signOut({ redirectUrl: "/login" });
         }, 1500);

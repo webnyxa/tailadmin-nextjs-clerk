@@ -46,28 +46,54 @@ export async function GET() {
         console.log("🔍 Raw API response:", JSON.stringify(data, null, 2));
         
         // Clerk API might return data in different formats
+        let allSessions: any[] = [];
         if (Array.isArray(data)) {
-          sessions = data;
+          allSessions = data;
         } else if (data?.data && Array.isArray(data.data)) {
-          sessions = data.data;
+          allSessions = data.data;
         } else if (data?.sessions && Array.isArray(data.sessions)) {
-          sessions = data.sessions;
-        } else {
-          sessions = [];
+          allSessions = data.sessions;
         }
         
-        console.log(`✅ Found ${sessions.length} sessions for user ${userId}`);
+        console.log(`📊 Found ${allSessions.length} total sessions for user ${userId}`);
+        
+        // Filter for only ACTIVE sessions
+        // Sessions can have status: active, ended, expired, removed, replaced, revoked, abandoned, pending
+        // We only want to show "active" sessions that haven't expired
+        const now = Date.now();
+        const inactiveStatuses = ['ended', 'expired', 'removed', 'replaced', 'revoked', 'abandoned'];
+        
+        sessions = allSessions.filter((session: any) => {
+          const status = (session.status || session.state || '').toLowerCase();
+          const expireAt = session.expire_at || session.expireAt;
+          
+          // Explicitly exclude sessions with inactive statuses
+          if (status && inactiveStatuses.includes(status)) {
+            return false;
+          }
+          
+          // Only include sessions with status "active" or no status (which might indicate active in some API versions)
+          const isActive = status === 'active' || status === '' || status === undefined;
+          
+          // Also check if session hasn't expired
+          let isNotExpired = true;
+          if (expireAt) {
+            const expireTime = typeof expireAt === 'number' ? expireAt : new Date(expireAt).getTime();
+            isNotExpired = expireTime > now;
+          }
+          
+          return isActive && isNotExpired;
+        });
+        
+        console.log(`✅ Filtered to ${sessions.length} active sessions (removed ${allSessions.length - sessions.length} inactive/expired sessions)`);
+        
         if (sessions.length > 0) {
-          console.log("📋 Sessions details:", sessions.map((s: any) => ({
+          console.log("📋 Active sessions details:", sessions.map((s: any) => ({
             id: s.id,
+            status: s.status || s.state,
             lastActive: s.last_active_at || s.lastActiveAt || s.lastActive,
-            expireAt: s.expire_at || s.expireAt || s.expireAt,
+            expireAt: s.expire_at || s.expireAt,
           })));
-        } else {
-          console.log("⚠️ No sessions found. This might be normal if:");
-          console.log("   - User just logged in");
-          console.log("   - Sessions haven't been created yet");
-          console.log("   - Check Clerk Dashboard → Users → Sessions tab");
         }
       } else {
         const errorData = await response.text();
@@ -89,6 +115,7 @@ export async function GET() {
         lastActiveOrganizationId: session.last_active_organization_id || session.lastActiveOrganizationId || null,
         actor: session.actor || null,
         expireAt: session.expire_at || session.expireAt,
+        status: session.status || session.state || "active",
       })),
     });
   } catch (error: any) {
