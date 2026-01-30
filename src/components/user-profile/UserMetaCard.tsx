@@ -1,21 +1,572 @@
 "use client";
-import React from "react";
-import { useUser } from "@clerk/nextjs";
+import React, { useState, useRef, useEffect } from "react";
+import { useUser, useReverification } from "@clerk/nextjs";
 import { useModal } from "../../hooks/useModal";
 import { Modal } from "../ui/modal";
 import Button from "../ui/button/Button";
 import Input from "../form/input/InputField";
 import Label from "../form/Label";
 import Image from "next/image";
+import Alert from "../ui/alert/Alert";
 
 
 export default function UserMetaCard() {
   const { isLoaded, user } = useUser();
   const { isOpen, openModal, closeModal } = useModal();
-  const handleSave = () => {
-    // Handle save logic here
-    console.log("Saving changes...");
-    closeModal();
+  const [isSaving, setIsSaving] = useState(false);
+  const [alert, setAlert] = useState<{ variant: "success" | "error"; message: string } | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [email, setEmail] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [emailId, setEmailId] = useState<string | null>(null);
+  const [verificationCode, setVerificationCode] = useState("");
+  const [emailStep, setEmailStep] = useState<"edit" | "verify">("edit");
+  const [isSendingCode, setIsSendingCode] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [emailBeingVerified, setEmailBeingVerified] = useState<string>(""); // Store email that code was sent to
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // Custom profile data from Clerk metadata
+  const [address, setAddress] = useState("");
+  const [bio, setBio] = useState("");
+  const [phone, setPhone] = useState("");
+  const [socialLinks, setSocialLinks] = useState({
+    facebook: "",
+    twitter: "",
+    linkedin: "",
+    instagram: "",
+  });
+  
+  // Use reverification hook for sensitive email changes
+  const changePrimaryEmail = useReverification((emailAddressId: string) =>
+    user?.update({ primaryEmailAddressId: emailAddressId })
+  );
+
+  useEffect(() => {
+    if (isLoaded && user) {
+      setFirstName(user.firstName || "");
+      setLastName(user.lastName || "");
+      setEmail(user.primaryEmailAddress?.emailAddress || "");
+      setNewEmail(user.primaryEmailAddress?.emailAddress || "");
+      
+      // Load custom profile data from Clerk metadata (using unsafeMetadata for client-side read/write)
+      const metadata = (user.unsafeMetadata as {
+        address?: string | { taxId?: string; country?: string; cityState?: string; postalCode?: string };
+        bio?: string;
+        phone?: string;
+        socialLinks?: {
+          facebook?: string;
+          twitter?: string;
+          linkedin?: string;
+          instagram?: string;
+        };
+      }) || {};
+      
+      // Ensure address is always a string (handle case where it might be an object from old data)
+      const addressValue = metadata.address;
+      const addressString = typeof addressValue === 'string' ? addressValue : '';
+      setAddress(addressString);
+      
+      setBio(metadata.bio || "");
+      setPhone(metadata.phone || "");
+      setSocialLinks({
+        facebook: metadata.socialLinks?.facebook || "",
+        twitter: metadata.socialLinks?.twitter || "",
+        linkedin: metadata.socialLinks?.linkedin || "",
+        instagram: metadata.socialLinks?.instagram || "",
+      });
+    }
+  }, [isLoaded, user]);
+
+  // Reset email verification state and form fields when modal closes
+  useEffect(() => {
+    if (!isOpen) {
+      setEmailStep("edit");
+      setNewEmail(user?.primaryEmailAddress?.emailAddress || "");
+      setEmailId(null);
+      setVerificationCode("");
+      setEmailBeingVerified("");
+      setAlert(null);
+      setImagePreview(null);
+      
+      // Reset form fields to current metadata values
+      if (user) {
+        const metadata = (user.unsafeMetadata as {
+          address?: string | { taxId?: string; country?: string; cityState?: string; postalCode?: string };
+          bio?: string;
+          phone?: string;
+          socialLinks?: {
+            facebook?: string;
+            twitter?: string;
+            linkedin?: string;
+            instagram?: string;
+          };
+        }) || {};
+        
+        // Ensure address is always a string (handle case where it might be an object from old data)
+        const addressValue = metadata.address;
+        const addressString = typeof addressValue === 'string' ? addressValue : '';
+        setAddress(addressString);
+        
+        setBio(metadata.bio || "");
+        setPhone(metadata.phone || "");
+        setSocialLinks({
+          facebook: metadata.socialLinks?.facebook || "",
+          twitter: metadata.socialLinks?.twitter || "",
+          linkedin: metadata.socialLinks?.linkedin || "",
+          instagram: metadata.socialLinks?.instagram || "",
+        });
+      }
+    }
+  }, [isOpen, user]);
+
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 5 * 1024 * 1024) { // 5MB limit
+        setAlert({ variant: "error", message: "Image size must be less than 5MB." });
+        return;
+      }
+      if (!file.type.startsWith("image/")) {
+        setAlert({ variant: "error", message: "Please select a valid image file." });
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // STEP 3: Send verification code to new email
+  const handleSendCode = async () => {
+    if (!user || !isLoaded || !newEmail.trim()) {
+      setAlert({ variant: "error", message: "Please enter a valid email address." });
+      return;
+    }
+
+    const emailValue = newEmail.trim();
+    const currentEmail = user.primaryEmailAddress?.emailAddress || "";
+
+    // Validate email format FIRST - before any API calls
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(emailValue)) {
+      setAlert({ variant: "error", message: "Please enter a valid email address." });
+      setIsSendingCode(false);
+      return;
+    }
+
+    // Check if email is the same as current
+    if (emailValue === currentEmail) {
+      setAlert({ variant: "error", message: "This is already your primary email address." });
+      return;
+    }
+
+    setIsSendingCode(true);
+    setAlert(null);
+
+    try {
+      // Check if email already exists in user's email addresses
+      let emailAddress = user.emailAddresses.find(
+        (emailAddr) => emailAddr.emailAddress === emailValue
+      );
+
+      if (!emailAddress) {
+        // 1. Add email to Clerk (unverified)
+        emailAddress = await user.createEmailAddress({
+          email: emailValue,
+        });
+        // Reload user to get the newly created email address
+        await user.reload();
+        // Find it again after reload
+        emailAddress = user.emailAddresses.find(
+          (emailAddr) => emailAddr.emailAddress === emailValue
+        );
+      }
+
+      if (!emailAddress) {
+        throw new Error("Failed to create email address");
+      }
+
+      // 2. Send verification code
+      await emailAddress.prepareVerification({
+        strategy: "email_code",
+      });
+
+      setEmailId(emailAddress.id);
+      setEmailBeingVerified(emailValue); // Store the email we're verifying
+      setEmailStep("verify");
+      setAlert({ 
+        variant: "success", 
+        message: "✅ Verification code sent to " + emailValue + ". Please check your inbox and enter the code below." 
+      });
+    } catch (error: any) {
+      console.error("Error sending verification code:", error);
+      console.log("Full error object:", JSON.stringify(error, null, 2));
+      console.log("Error.errors:", error?.errors);
+      console.log("Error.errors[0]:", error?.errors?.[0]);
+      console.log("Error.errors[0].errors:", error?.errors?.[0]?.errors);
+      
+      // Extract long_message from nested error structure
+      // Clerk API response structure: { errors: [{ message, long_message, errors: [{ message, long_message }] }] }
+      let longMessage = null;
+      let errorMessage = null;
+      
+      // Method 1: Check nested errors array first (most specific - from network response)
+      if (error?.errors?.[0]?.errors && Array.isArray(error.errors[0].errors) && error.errors[0].errors.length > 0) {
+        const nestedError = error.errors[0].errors[0];
+        longMessage = nestedError?.long_message;
+        errorMessage = nestedError?.message;
+        console.log("Found nested error - longMessage:", longMessage, "errorMessage:", errorMessage);
+      }
+      
+      // Method 2: Check top level errors array
+      if (!longMessage && error?.errors && Array.isArray(error.errors) && error.errors.length > 0) {
+        const firstError = error.errors[0];
+        longMessage = firstError?.long_message;
+        errorMessage = firstError?.message;
+        console.log("Found top level error - longMessage:", longMessage, "errorMessage:", errorMessage);
+      }
+      
+      // Method 3: Check direct error properties (for SDK wrapped errors)
+      if (!longMessage) {
+        longMessage = error?.long_message;
+        errorMessage = error?.message;
+        console.log("Found direct error - longMessage:", longMessage, "errorMessage:", errorMessage);
+      }
+      
+      // Method 4: Check error.data (some SDKs wrap response in data)
+      if (!longMessage && error?.data?.errors?.[0]) {
+        const dataError = error.data.errors[0];
+        longMessage = dataError?.long_message || dataError?.errors?.[0]?.long_message;
+        errorMessage = dataError?.message || dataError?.errors?.[0]?.message;
+        console.log("Found data error - longMessage:", longMessage, "errorMessage:", errorMessage);
+      }
+      
+      // ALWAYS prioritize long_message over message
+      const finalMessage = longMessage || errorMessage || "Failed to send verification code. Please try again.";
+      console.log("Final message selected:", finalMessage);
+      
+      // Clean up error message - remove "Clerk:" prefix and code if present
+      let cleanMessage = finalMessage.replace(/^Clerk:\s*/i, "").replace(/\(code="[^"]+"\)/g, "").trim();
+      
+      // For invalid email errors, ALWAYS use long_message if available
+      const lowerError = cleanMessage.toLowerCase();
+      if (lowerError.includes("invalid") || lowerError.includes("must be a valid") || lowerError === "is invalid") {
+        // If we have longMessage, use it; otherwise use the clean message
+        const displayMessage = longMessage ? longMessage.replace(/^Clerk:\s*/i, "").replace(/\(code="[^"]+"\)/g, "").trim() : cleanMessage;
+        console.log("Setting invalid email error - displayMessage:", displayMessage);
+        setAlert({ variant: "error", message: displayMessage || "Please enter a valid email address." });
+      } else if (lowerError.includes("reverification") && !lowerError.includes("invalid")) {
+        // Only show reverification if it's not an invalid email
+        setAlert({ variant: "error", message: "Security verification required. Please sign out and sign in again, then try changing your email." });
+      } else {
+        setAlert({ variant: "error", message: cleanMessage });
+      }
+    } finally {
+      setIsSendingCode(false);
+    }
+  };
+
+  // STEP 5: Verify code and make email primary
+  const handleVerify = async () => {
+    if (!user || !isLoaded || !emailId || !verificationCode.trim()) {
+      setAlert({ variant: "error", message: "Please enter the verification code." });
+      return;
+    }
+
+    setIsVerifying(true);
+    setAlert(null);
+
+    try {
+      // Find the email address
+      const emailAddress = user.emailAddresses.find(
+        (e) => e.id === emailId
+      );
+
+      if (!emailAddress) {
+        throw new Error("Email address not found. Please try again.");
+      }
+
+      // 1. Verify email with OTP code - this is mandatory
+      // Only proceed if verification is successful
+      let verificationSuccessful = false;
+      
+      try {
+        await emailAddress.attemptVerification({ code: verificationCode.trim() });
+        verificationSuccessful = true;
+      } catch (verifyError: any) {
+        const errorObj = verifyError?.errors?.[0] || verifyError;
+        const errorMessage = errorObj?.long_message || errorObj?.message || verifyError?.message || "";
+        const lowerErrorMessage = errorMessage.toLowerCase();
+        
+        // Check if error is "already verified" - email is already verified, skip verification
+        if (lowerErrorMessage.includes("already verified")) {
+          console.log("Email is already verified, setting as primary directly");
+          verificationSuccessful = true;
+        } 
+        // Check if error is "reverification required" - user needs to reverify their session
+        else if (lowerErrorMessage.includes("reverification required") || lowerErrorMessage.includes("reverification")) {
+          setAlert({ 
+            variant: "error", 
+            message: "Security verification required. Please sign out and sign in again, then try changing your email." 
+          });
+          setIsVerifying(false);
+          return;
+        } else {
+          // Wrong OTP or other verification error - show proper error message and STOP
+          let displayMessage = errorObj?.long_message || errorMessage || "Invalid verification code. Please check the code and try again.";
+          
+          // Clean up error message
+          displayMessage = displayMessage.replace(/^Clerk:\s*/i, "").replace(/\(code="[^"]+"\)/g, "").trim();
+          
+          // Show user-friendly message
+          if (displayMessage.toLowerCase().includes("invalid") || displayMessage.toLowerCase().includes("incorrect") || displayMessage.toLowerCase().includes("wrong")) {
+            displayMessage = "Invalid verification code. Please check the code and try again.";
+          }
+          
+          setAlert({ 
+            variant: "error", 
+            message: displayMessage 
+          });
+          setIsVerifying(false);
+          return; // STOP - don't proceed if verification failed
+        }
+      }
+
+      // Double check - only proceed if verification was successful
+      if (!verificationSuccessful) {
+        setAlert({ 
+          variant: "error", 
+          message: "Email verification failed. Please try again." 
+        });
+        setIsVerifying(false);
+        return;
+      }
+
+      // 2. Set as primary email using reverification wrapper
+      // This handles reverification automatically when required
+      try {
+        if (changePrimaryEmail) {
+          await changePrimaryEmail(emailAddress.id);
+        } else {
+          // Fallback if reverification hook is not available
+          await user.update({
+            primaryEmailAddressId: emailAddress.id,
+          });
+        }
+      } catch (reverificationError: any) {
+        // Handle reverification cancellation or errors
+        const revErrorObj = reverificationError?.errors?.[0] || reverificationError;
+        const revErrorMessage = revErrorObj?.long_message || revErrorObj?.message || reverificationError?.message || "";
+        
+        // Check if user cancelled reverification
+        if (revErrorMessage.includes("cancelled") || revErrorMessage.includes("reverification_cancelled")) {
+          setAlert({ 
+            variant: "error", 
+            message: "Verification was cancelled. Please try again." 
+          });
+          setIsVerifying(false);
+          return;
+        }
+        
+        // Check if reverification required
+        if (revErrorMessage.toLowerCase().includes("reverification required") || revErrorMessage.toLowerCase().includes("reverification")) {
+          setAlert({ 
+            variant: "error", 
+            message: "Security verification required. Please sign out and sign in again, then try changing your email." 
+          });
+          setIsVerifying(false);
+          return;
+        }
+        
+        // Other errors
+        throw reverificationError;
+      }
+
+      // 3. (Optional) Remove old email if it exists and is not primary
+      const oldPrimaryEmail = user.primaryEmailAddress;
+      if (oldPrimaryEmail && oldPrimaryEmail.id !== emailAddress.id) {
+        try {
+          await oldPrimaryEmail.destroy();
+        } catch (destroyError) {
+          // Ignore errors when destroying old email (might be needed for recovery)
+          console.log("Could not remove old email (this is okay):", destroyError);
+        }
+      }
+
+      // 4. Reload user to sync changes
+      await user.reload();
+
+      // Update local state
+      setEmail(user.primaryEmailAddress?.emailAddress || newEmail);
+      setEmailStep("edit");
+      setVerificationCode("");
+      setEmailId(null);
+
+      setAlert({ 
+        variant: "success", 
+        message: "Email updated successfully! Your new email address is now active." 
+      });
+
+      // Close modal after a short delay (no reload needed)
+      setTimeout(() => {
+        closeModal();
+        setAlert(null);
+        setEmailStep("edit");
+        setVerificationCode("");
+        setEmailId(null);
+        setEmailBeingVerified("");
+      }, 2000);
+    } catch (error: any) {
+      console.error("Error verifying email:", error);
+      // Use long_message if available, otherwise fallback to message
+      const errorObj = error?.errors?.[0] || error;
+      let errorMessage = errorObj?.long_message || errorObj?.message || error?.message || "Invalid verification code. Please try again.";
+      
+      // Clean up error message - remove "Clerk:" prefix and code if present
+      errorMessage = errorMessage.replace(/^Clerk:\s*/i, "").replace(/\(code="[^"]+"\)/g, "").trim();
+      
+      // Show user-friendly message
+      if (errorMessage.toLowerCase().includes("cancelled")) {
+        setAlert({ variant: "error", message: "Verification was cancelled. Please try again." });
+      } else if (errorMessage.toLowerCase().includes("invalid") || errorMessage.toLowerCase().includes("incorrect")) {
+        setAlert({ variant: "error", message: "Invalid verification code. Please check the code and try again." });
+      } else {
+        setAlert({ variant: "error", message: errorMessage });
+      }
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleResendCode = async () => {
+    if (!user || !emailId) return;
+    
+    setIsSendingCode(true);
+    setAlert(null);
+
+    try {
+      const emailAddress = user.emailAddresses.find(
+        (e) => e.id === emailId
+      );
+
+      if (emailAddress) {
+        await emailAddress.prepareVerification({
+          strategy: "email_code",
+        });
+        setAlert({ 
+          variant: "success", 
+          message: "✅ Verification code resent to " + (emailAddress.emailAddress || newEmail) + ". Please check your inbox." 
+        });
+      }
+    } catch (error: any) {
+      console.error("Error resending code:", error);
+      // Use long_message if available, otherwise fallback to message
+      const errorObj = error?.errors?.[0] || error;
+      const errorMessage = errorObj?.long_message || errorObj?.message || error?.message || "Failed to resend code. Please try again.";
+      setAlert({ variant: "error", message: errorMessage });
+    } finally {
+      setIsSendingCode(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!user || !isLoaded) return;
+
+    setIsSaving(true);
+    setAlert(null);
+
+    try {
+      const file = fileInputRef.current?.files?.[0];
+      const firstNameValue = firstName.trim();
+      const lastNameValue = lastName.trim();
+      const currentEmail = user.primaryEmailAddress?.emailAddress || "";
+      const emailValue = newEmail.trim();
+
+      // Check if email is being changed
+      if (emailValue && emailValue !== currentEmail) {
+        // Email is being changed - trigger verification flow
+        setIsSaving(false);
+        try {
+          await handleSendCode();
+        } catch (error) {
+          // Error already handled in handleSendCode
+        }
+        return; // Don't proceed with other updates until email is verified
+      }
+
+      // Update profile image if a new one is selected
+      if (file) {
+        await user.setProfileImage({ file });
+      }
+
+      // Update name if changed
+      if (firstNameValue || lastNameValue) {
+        await user.update({
+          firstName: firstNameValue || undefined,
+          lastName: lastNameValue || undefined,
+        });
+      }
+
+      // Update custom profile data in Clerk metadata (using unsafeMetadata for client-side updates)
+      const currentMetadata = (user.unsafeMetadata as Record<string, any>) || {};
+      
+      // Ensure address is a string (clean up any old object structure)
+      const addressString = typeof address === 'string' ? address.trim() : '';
+      
+      await user.update({
+        unsafeMetadata: {
+          ...currentMetadata,
+          address: addressString || undefined, // Explicitly set as string to overwrite any old object data
+          bio: bio.trim() || undefined,
+          phone: phone.trim() || undefined,
+          socialLinks: {
+            facebook: socialLinks.facebook.trim() || undefined,
+            twitter: socialLinks.twitter.trim() || undefined,
+            linkedin: socialLinks.linkedin.trim() || undefined,
+            instagram: socialLinks.instagram.trim() || undefined,
+          },
+        },
+      });
+      
+      // Reload user to sync metadata changes
+      await user.reload();
+      
+      // Show success message if we get here (no errors occurred)
+      setAlert({ variant: "success", message: "Profile updated successfully!" });
+      
+      // Close modal after a short delay
+      setTimeout(() => {
+        closeModal();
+        setAlert(null);
+        setImagePreview(null);
+        if (fileInputRef.current) {
+          fileInputRef.current.value = "";
+        }
+        // No reload needed - user.reload() already updates the data
+      }, 1500);
+    } catch (error: any) {
+      console.error("Error updating profile:", error);
+      const errorMessage = error?.errors?.[0]?.message || error?.message || "Failed to update profile. Please try again.";
+      
+      // Handle specific email errors
+      if (errorMessage.toLowerCase().includes("email") || errorMessage.toLowerCase().includes("verification")) {
+        setAlert({
+          variant: "error",
+          message: errorMessage,
+        });
+      } else {
+        setAlert({
+          variant: "error",
+          message: errorMessage,
+        });
+      }
+      setIsSaving(false);
+    }
   };
   return (
     <>
@@ -36,18 +587,18 @@ export default function UserMetaCard() {
               </h4>
               <div className="flex flex-col items-center gap-1 text-center xl:flex-row xl:gap-3 xl:text-left">
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                  Team Manager
+                  {bio || "—"}
                 </p>
                 <div className="hidden h-3.5 w-px bg-gray-300 dark:bg-gray-700 xl:block"></div>
                 <p className="text-sm text-gray-500 dark:text-gray-400">
-                  Arizona, United States
+                  {typeof address === 'string' ? address || "—" : "—"}
                 </p>
               </div>
             </div>
             <div className="flex items-center order-2 gap-2 grow xl:order-3 xl:justify-end">
               <a        
         target="_blank"
-        rel="noreferrer" href='https://www.facebook.com/PimjoHQ' className="flex h-11 w-11 items-center justify-center gap-2 rounded-full border border-gray-300 bg-white text-sm font-medium text-gray-700 shadow-theme-xs hover:bg-gray-50 hover:text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-white/[0.03] dark:hover:text-gray-200">
+        rel="noreferrer" href={socialLinks.facebook || '#'} className={`flex h-11 w-11 items-center justify-center gap-2 rounded-full border border-gray-300 bg-white text-sm font-medium text-gray-700 shadow-theme-xs hover:bg-gray-50 hover:text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-white/[0.03] dark:hover:text-gray-200 ${!socialLinks.facebook ? 'pointer-events-none opacity-50' : ''}`}>
                 <svg
                   className="fill-current"
                   width="20"
@@ -63,8 +614,8 @@ export default function UserMetaCard() {
                 </svg>
               </a>
 
-              <a href='https://x.com/PimjoHQ' target="_blank"
-        rel="noreferrer"  className="flex h-11 w-11 items-center justify-center gap-2 rounded-full border border-gray-300 bg-white text-sm font-medium text-gray-700 shadow-theme-xs hover:bg-gray-50 hover:text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-white/[0.03] dark:hover:text-gray-200">
+              <a href={socialLinks.twitter || '#'} target="_blank"
+        rel="noreferrer"  className={`flex h-11 w-11 items-center justify-center gap-2 rounded-full border border-gray-300 bg-white text-sm font-medium text-gray-700 shadow-theme-xs hover:bg-gray-50 hover:text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-white/[0.03] dark:hover:text-gray-200 ${!socialLinks.twitter ? 'pointer-events-none opacity-50' : ''}`}>
                 <svg
                   className="fill-current"
                   width="20"
@@ -80,8 +631,8 @@ export default function UserMetaCard() {
                 </svg>
               </a>
 
-              <a href="https://www.linkedin.com/company/pimjo" target="_blank"
-        rel="noreferrer" className="flex h-11 w-11 items-center justify-center gap-2 rounded-full border border-gray-300 bg-white text-sm font-medium text-gray-700 shadow-theme-xs hover:bg-gray-50 hover:text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-white/[0.03] dark:hover:text-gray-200">
+              <a href={socialLinks.linkedin || '#'} target="_blank"
+        rel="noreferrer" className={`flex h-11 w-11 items-center justify-center gap-2 rounded-full border border-gray-300 bg-white text-sm font-medium text-gray-700 shadow-theme-xs hover:bg-gray-50 hover:text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-white/[0.03] dark:hover:text-gray-200 ${!socialLinks.linkedin ? 'pointer-events-none opacity-50' : ''}`}>
                 <svg
                   className="fill-current"
                   width="20"
@@ -97,8 +648,8 @@ export default function UserMetaCard() {
                 </svg>
               </a>
 
-              <a href='https://instagram.com/PimjoHQ' target="_blank"
-        rel="noreferrer" className="flex h-11 w-11 items-center justify-center gap-2 rounded-full border border-gray-300 bg-white text-sm font-medium text-gray-700 shadow-theme-xs hover:bg-gray-50 hover:text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-white/[0.03] dark:hover:text-gray-200">
+              <a href={socialLinks.instagram || '#'} target="_blank"
+        rel="noreferrer" className={`flex h-11 w-11 items-center justify-center gap-2 rounded-full border border-gray-300 bg-white text-sm font-medium text-gray-700 shadow-theme-xs hover:bg-gray-50 hover:text-gray-800 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-white/[0.03] dark:hover:text-gray-200 ${!socialLinks.instagram ? 'pointer-events-none opacity-50' : ''}`}>
                 <svg
                   className="fill-current"
                   width="20"
@@ -138,7 +689,14 @@ export default function UserMetaCard() {
           </button>
         </div>
       </div>
-      <Modal isOpen={isOpen} onClose={closeModal} className="max-w-[700px] m-4">
+      <Modal 
+        isOpen={isOpen} 
+        onClose={() => {
+          setAlert(null); // Clear any error messages when closing
+          closeModal();
+        }} 
+        className="max-w-[700px] m-4"
+      >
         <div className="no-scrollbar relative w-full max-w-[700px] overflow-y-auto rounded-3xl bg-white p-4 dark:bg-gray-900 lg:p-11">
           <div className="px-2 pr-14">
             <h4 className="mb-2 text-2xl font-semibold text-gray-800 dark:text-white/90">
@@ -148,8 +706,72 @@ export default function UserMetaCard() {
               Update your details to keep your profile up-to-date.
             </p>
           </div>
+          {alert && (
+            <div className="mb-4 px-2">
+              <Alert
+                variant={alert.variant}
+                title={alert.variant === "success" ? "Success" : "Error"}
+                message={alert.message}
+                showLink={false}
+              />
+            </div>
+          )}
           <form className="flex flex-col">
             <div className="custom-scrollbar h-[450px] overflow-y-auto px-2 pb-3">
+              <div className="mb-7">
+                <h5 className="mb-5 text-lg font-medium text-gray-800 dark:text-white/90 lg:mb-6">
+                  Profile Picture
+                </h5>
+                <div className="flex flex-col items-center gap-4">
+                  <div className="relative w-32 h-32 overflow-hidden border-2 border-gray-200 rounded-full dark:border-gray-800">
+                    <Image
+                      width={128}
+                      height={128}
+                      src={imagePreview || (isLoaded && user?.imageUrl ? user.imageUrl : "/images/user/owner.jpg")}
+                      alt="Profile preview"
+                      className="object-cover w-full h-full"
+                    />
+                  </div>
+                  <div>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleImageChange}
+                      className="hidden"
+                      id="profile-image-upload"
+                    />
+                    <label
+                      htmlFor="profile-image-upload"
+                      className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-white/[0.03]"
+                    >
+                      <svg
+                        className="fill-current"
+                        width="18"
+                        height="18"
+                        viewBox="0 0 18 18"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                      >
+                        <path
+                          d="M9 12.75C11.4853 12.75 13.5 10.7353 13.5 8.25C13.5 5.76472 11.4853 3.75 9 3.75C6.51472 3.75 4.5 5.76472 4.5 8.25C4.5 10.7353 6.51472 12.75 9 12.75Z"
+                          fill=""
+                        />
+                        <path
+                          fillRule="evenodd"
+                          clipRule="evenodd"
+                          d="M9 0.75C4.44365 0.75 0.75 4.44365 0.75 9C0.75 13.5563 4.44365 17.25 9 17.25C13.5563 17.25 17.25 13.5563 17.25 9C17.25 4.44365 13.5563 0.75 9 0.75ZM9 15.75C5.27208 15.75 2.25 12.7279 2.25 9C2.25 5.27208 5.27208 2.25 9 2.25C12.7279 2.25 15.75 5.27208 15.75 9C15.75 12.7279 12.7279 15.75 9 15.75Z"
+                          fill=""
+                        />
+                      </svg>
+                      Choose Image
+                    </label>
+                    <p className="mt-2 text-xs text-center text-gray-500 dark:text-gray-400">
+                      Max size: 5MB
+                    </p>
+                  </div>
+                </div>
+              </div>
               <div>
                 <h5 className="mb-5 text-lg font-medium text-gray-800 dark:text-white/90 lg:mb-6">
                   Social Links
@@ -160,20 +782,29 @@ export default function UserMetaCard() {
                     <Label>Facebook</Label>
                     <Input
                       type="text"
-                      defaultValue="https://www.facebook.com/PimjoHQ"
+                      value={socialLinks.facebook}
+                      onChange={(e) => setSocialLinks({ ...socialLinks, facebook: e.target.value })}
+                      placeholder="https://www.facebook.com/yourprofile"
                     />
                   </div>
 
                   <div>
                     <Label>X.com</Label>
-                    <Input type="text" defaultValue="https://x.com/PimjoHQ" />
+                    <Input 
+                      type="text" 
+                      value={socialLinks.twitter}
+                      onChange={(e) => setSocialLinks({ ...socialLinks, twitter: e.target.value })}
+                      placeholder="https://x.com/yourprofile"
+                    />
                   </div>
 
                   <div>
                     <Label>Linkedin</Label>
                     <Input
                       type="text"
-                      defaultValue="https://www.linkedin.com/company/pimjo"
+                      value={socialLinks.linkedin}
+                      onChange={(e) => setSocialLinks({ ...socialLinks, linkedin: e.target.value })}
+                      placeholder="https://www.linkedin.com/in/yourprofile"
                     />
                   </div>
 
@@ -181,7 +812,9 @@ export default function UserMetaCard() {
                     <Label>Instagram</Label>
                     <Input
                       type="text"
-                      defaultValue="https://instagram.com/PimjoHQ"
+                      value={socialLinks.instagram}
+                      onChange={(e) => setSocialLinks({ ...socialLinks, instagram: e.target.value })}
+                      placeholder="https://instagram.com/yourprofile"
                     />
                   </div>
                 </div>
@@ -194,38 +827,149 @@ export default function UserMetaCard() {
                 <div className="grid grid-cols-1 gap-x-6 gap-y-5 lg:grid-cols-2">
                   <div className="col-span-2 lg:col-span-1">
                     <Label>First Name</Label>
-                    <Input type="text" defaultValue={isLoaded && user?.firstName ? user.firstName : ""} />
+                    <Input 
+                      type="text" 
+                      value={firstName}
+                      onChange={(e) => setFirstName(e.target.value)}
+                    />
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
                     <Label>Last Name</Label>
-                    <Input type="text" defaultValue={isLoaded && user?.lastName ? user.lastName : ""} />
+                    <Input 
+                      type="text" 
+                      value={lastName}
+                      onChange={(e) => setLastName(e.target.value)}
+                    />
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
                     <Label>Email Address</Label>
-                    <Input type="text" defaultValue={isLoaded && user?.primaryEmailAddress?.emailAddress ? user.primaryEmailAddress.emailAddress : ""} />
+                    {emailStep === "edit" ? (
+                      <div className="space-y-2">
+                        <div>
+                          <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">
+                            Current: <span className="font-medium">{user?.primaryEmailAddress?.emailAddress || "No email"}</span>
+                          </p>
+                          <Input 
+                            type="email" 
+                            value={newEmail}
+                            onChange={(e) => setNewEmail(e.target.value)}
+                            placeholder="Enter your new email address"
+                            disabled={isSendingCode || isSaving}
+                          />
+                        </div>
+                        {newEmail !== (user?.primaryEmailAddress?.emailAddress || "") && newEmail.trim() && (
+                          <p className="text-xs text-amber-600 dark:text-amber-400">
+                            ⚠️ Click "Save Changes" to send verification code to this email
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                          <p className="text-sm text-blue-800 dark:text-blue-300 font-medium mb-1">
+                            📧 Verification Code Sent
+                          </p>
+                          <p className="text-xs text-blue-600 dark:text-blue-400">
+                            Code sent to: <span className="font-medium">{emailBeingVerified || newEmail}</span>
+                          </p>
+                          <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                            Please check your inbox and enter the 6-digit code below.
+                          </p>
+                        </div>
+                        <Input 
+                          type="text" 
+                          value={verificationCode}
+                          onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="Enter 6-digit verification code"
+                          disabled={isVerifying}
+                          className="text-center text-lg tracking-widest font-mono"
+                        />
+                        <div className="flex items-center justify-between">
+                          <button
+                            type="button"
+                            onClick={handleResendCode}
+                            disabled={isSendingCode}
+                            className="text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 disabled:opacity-50"
+                          >
+                            {isSendingCode ? "Sending..." : "Resend Code"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEmailStep("edit");
+                              setVerificationCode("");
+                              setEmailId(null);
+                              setAlert(null);
+                            }}
+                            className="text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+                          >
+                            ← Change email
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
                     <Label>Phone</Label>
-                    <Input type="text" defaultValue="+09 363 398 46" />
+                    <Input 
+                      type="text" 
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="+1 234 567 8900"
+                    />
                   </div>
 
                   <div className="col-span-2">
                     <Label>Bio</Label>
-                    <Input type="text" defaultValue="Team Manager" />
+                    <Input 
+                      type="text" 
+                      value={bio}
+                      onChange={(e) => setBio(e.target.value)}
+                      placeholder="Tell us about yourself"
+                    />
+                  </div>
+
+                  <div className="col-span-2">
+                    <Label>Address</Label>
+                    <Input 
+                      type="text" 
+                      value={address}
+                      onChange={(e) => setAddress(e.target.value)}
+                      placeholder="City, State, Country"
+                    />
                   </div>
                 </div>
               </div>
             </div>
             <div className="flex items-center gap-3 px-2 mt-6 lg:justify-end">
-              <Button size="sm" variant="outline" onClick={closeModal}>
+              <Button 
+                size="sm" 
+                variant="outline" 
+                onClick={closeModal}
+                disabled={isSaving || isVerifying || isSendingCode}
+              >
                 Close
               </Button>
-              <Button size="sm" onClick={handleSave}>
-                Save Changes
-              </Button>
+              {emailStep === "verify" ? (
+                <Button 
+                  size="sm" 
+                  onClick={handleVerify}
+                  disabled={isVerifying || !verificationCode.trim() || !isLoaded}
+                >
+                  {isVerifying ? "Verifying..." : "Verify & Save"}
+                </Button>
+              ) : (
+                <Button 
+                  size="sm" 
+                  onClick={handleSave}
+                  disabled={isSaving || !isLoaded || isSendingCode}
+                >
+                  {isSaving ? "Saving..." : "Save Changes"}
+                </Button>
+              )}
             </div>
           </form>
         </div>

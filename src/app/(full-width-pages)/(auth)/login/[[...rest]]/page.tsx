@@ -19,10 +19,10 @@ export default async function LoginPage() {
       <div className="flex flex-col justify-center flex-1 w-full max-w-md mx-auto sm:py-10">
         <div className="flex justify-center">
           <SignIn
-            path="/login"
+            path={process.env.NEXT_PUBLIC_CLERK_SIGN_IN_URL || "/login"}
             routing="path"
-            signUpUrl="/signup"
-            forceRedirectUrl="/"
+            signUpUrl={process.env.NEXT_PUBLIC_CLERK_SIGN_UP_URL || "/signup"}
+            forceRedirectUrl={process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL || "/"}
             appearance={{
               elements: {
                 rootBox: "w-full",
