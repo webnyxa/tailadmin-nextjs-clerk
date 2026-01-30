@@ -1,19 +1,66 @@
 "use client";
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { useUser } from "@clerk/nextjs";
 import { useModal } from "../../hooks/useModal";
 import { Modal } from "../ui/modal";
 import Button from "../ui/button/Button";
 import Input from "../form/input/InputField";
 import Label from "../form/Label";
+import Alert from "../ui/alert/Alert";
 
 export default function UserInfoCard() {
   const { isLoaded, user } = useUser();
   const { isOpen, openModal, closeModal } = useModal();
-  const handleSave = () => {
-    // Handle save logic here
-    console.log("Saving changes...");
-    closeModal();
+  const [isSaving, setIsSaving] = useState(false);
+  const [alert, setAlert] = useState<{ variant: "success" | "error"; message: string } | null>(null);
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+
+  useEffect(() => {
+    if (isLoaded && user) {
+      setFirstName(user.firstName || "");
+      setLastName(user.lastName || "");
+    }
+  }, [isLoaded, user]);
+
+  const handleSave = async () => {
+    if (!user || !isLoaded) return;
+
+    setIsSaving(true);
+    setAlert(null);
+
+    try {
+      const firstNameValue = firstName.trim();
+      const lastNameValue = lastName.trim();
+
+      if (!firstNameValue && !lastNameValue) {
+        setAlert({ variant: "error", message: "First name or last name is required." });
+        setIsSaving(false);
+        return;
+      }
+
+      await user.update({
+        firstName: firstNameValue || undefined,
+        lastName: lastNameValue || undefined,
+      });
+
+      setAlert({ variant: "success", message: "Profile updated successfully!" });
+      
+      // Close modal after a short delay
+      setTimeout(() => {
+        closeModal();
+        setAlert(null);
+        // Reload to show updated data
+        window.location.reload();
+      }, 1500);
+    } catch (error: any) {
+      console.error("Error updating profile:", error);
+      setAlert({
+        variant: "error",
+        message: error?.errors?.[0]?.message || "Failed to update profile. Please try again.",
+      });
+      setIsSaving(false);
+    }
   };
   return (
     <div className="p-5 border border-gray-200 rounded-2xl dark:border-gray-800 lg:p-6">
@@ -104,6 +151,16 @@ export default function UserInfoCard() {
               Update your details to keep your profile up-to-date.
             </p>
           </div>
+          {alert && (
+            <div className="mb-4 px-2">
+              <Alert
+                variant={alert.variant}
+                title={alert.variant === "success" ? "Success" : "Error"}
+                message={alert.message}
+                showLink={false}
+              />
+            </div>
+          )}
           <form className="flex flex-col">
             <div className="custom-scrollbar h-[450px] overflow-y-auto px-2 pb-3">
               <div>
@@ -150,12 +207,20 @@ export default function UserInfoCard() {
                 <div className="grid grid-cols-1 gap-x-6 gap-y-5 lg:grid-cols-2">
                   <div className="col-span-2 lg:col-span-1">
                     <Label>First Name</Label>
-                    <Input type="text" defaultValue={isLoaded && user?.firstName ? user.firstName : ""} />
+                    <Input 
+                      type="text" 
+                      value={firstName}
+                      onChange={(e) => setFirstName(e.target.value)}
+                    />
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
                     <Label>Last Name</Label>
-                    <Input type="text" defaultValue={isLoaded && user?.lastName ? user.lastName : ""} />
+                    <Input 
+                      type="text" 
+                      value={lastName}
+                      onChange={(e) => setLastName(e.target.value)}
+                    />
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
@@ -176,11 +241,20 @@ export default function UserInfoCard() {
               </div>
             </div>
             <div className="flex items-center gap-3 px-2 mt-6 lg:justify-end">
-              <Button size="sm" variant="outline" onClick={closeModal}>
+              <Button 
+                size="sm" 
+                variant="outline" 
+                onClick={closeModal}
+                disabled={isSaving}
+              >
                 Close
               </Button>
-              <Button size="sm" onClick={handleSave}>
-                Save Changes
+              <Button 
+                size="sm" 
+                onClick={handleSave}
+                disabled={isSaving || !isLoaded}
+              >
+                {isSaving ? "Saving..." : "Save Changes"}
               </Button>
             </div>
           </form>

@@ -1,5 +1,5 @@
 "use client";
-import React from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useUser } from "@clerk/nextjs";
 import { useModal } from "../../hooks/useModal";
 import { Modal } from "../ui/modal";
@@ -7,15 +7,90 @@ import Button from "../ui/button/Button";
 import Input from "../form/input/InputField";
 import Label from "../form/Label";
 import Image from "next/image";
+import Alert from "../ui/alert/Alert";
 
 
 export default function UserMetaCard() {
   const { isLoaded, user } = useUser();
   const { isOpen, openModal, closeModal } = useModal();
-  const handleSave = () => {
-    // Handle save logic here
-    console.log("Saving changes...");
-    closeModal();
+  const [isSaving, setIsSaving] = useState(false);
+  const [alert, setAlert] = useState<{ variant: "success" | "error"; message: string } | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isLoaded && user) {
+      setFirstName(user.firstName || "");
+      setLastName(user.lastName || "");
+    }
+  }, [isLoaded, user]);
+
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 5 * 1024 * 1024) { // 5MB limit
+        setAlert({ variant: "error", message: "Image size must be less than 5MB." });
+        return;
+      }
+      if (!file.type.startsWith("image/")) {
+        setAlert({ variant: "error", message: "Please select a valid image file." });
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!user || !isLoaded) return;
+
+    setIsSaving(true);
+    setAlert(null);
+
+    try {
+      const file = fileInputRef.current?.files?.[0];
+      const firstNameValue = firstName.trim();
+      const lastNameValue = lastName.trim();
+
+      // Update profile image if a new one is selected
+      if (file) {
+        await user.setProfileImage({ file });
+      }
+
+      // Update name if changed
+      if (firstNameValue || lastNameValue) {
+        await user.update({
+          firstName: firstNameValue || undefined,
+          lastName: lastNameValue || undefined,
+        });
+      }
+
+      setAlert({ variant: "success", message: "Profile updated successfully!" });
+      
+      // Close modal after a short delay
+      setTimeout(() => {
+        closeModal();
+        setAlert(null);
+        setImagePreview(null);
+        if (fileInputRef.current) {
+          fileInputRef.current.value = "";
+        }
+        // Reload to show updated data
+        window.location.reload();
+      }, 1500);
+    } catch (error: any) {
+      console.error("Error updating profile:", error);
+      setAlert({
+        variant: "error",
+        message: error?.errors?.[0]?.message || "Failed to update profile. Please try again.",
+      });
+      setIsSaving(false);
+    }
   };
   return (
     <>
@@ -148,8 +223,72 @@ export default function UserMetaCard() {
               Update your details to keep your profile up-to-date.
             </p>
           </div>
+          {alert && (
+            <div className="mb-4 px-2">
+              <Alert
+                variant={alert.variant}
+                title={alert.variant === "success" ? "Success" : "Error"}
+                message={alert.message}
+                showLink={false}
+              />
+            </div>
+          )}
           <form className="flex flex-col">
             <div className="custom-scrollbar h-[450px] overflow-y-auto px-2 pb-3">
+              <div className="mb-7">
+                <h5 className="mb-5 text-lg font-medium text-gray-800 dark:text-white/90 lg:mb-6">
+                  Profile Picture
+                </h5>
+                <div className="flex flex-col items-center gap-4">
+                  <div className="relative w-32 h-32 overflow-hidden border-2 border-gray-200 rounded-full dark:border-gray-800">
+                    <Image
+                      width={128}
+                      height={128}
+                      src={imagePreview || (isLoaded && user?.imageUrl ? user.imageUrl : "/images/user/owner.jpg")}
+                      alt="Profile preview"
+                      className="object-cover w-full h-full"
+                    />
+                  </div>
+                  <div>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleImageChange}
+                      className="hidden"
+                      id="profile-image-upload"
+                    />
+                    <label
+                      htmlFor="profile-image-upload"
+                      className="flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-white/[0.03]"
+                    >
+                      <svg
+                        className="fill-current"
+                        width="18"
+                        height="18"
+                        viewBox="0 0 18 18"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                      >
+                        <path
+                          d="M9 12.75C11.4853 12.75 13.5 10.7353 13.5 8.25C13.5 5.76472 11.4853 3.75 9 3.75C6.51472 3.75 4.5 5.76472 4.5 8.25C4.5 10.7353 6.51472 12.75 9 12.75Z"
+                          fill=""
+                        />
+                        <path
+                          fillRule="evenodd"
+                          clipRule="evenodd"
+                          d="M9 0.75C4.44365 0.75 0.75 4.44365 0.75 9C0.75 13.5563 4.44365 17.25 9 17.25C13.5563 17.25 17.25 13.5563 17.25 9C17.25 4.44365 13.5563 0.75 9 0.75ZM9 15.75C5.27208 15.75 2.25 12.7279 2.25 9C2.25 5.27208 5.27208 2.25 9 2.25C12.7279 2.25 15.75 5.27208 15.75 9C15.75 12.7279 12.7279 15.75 9 15.75Z"
+                          fill=""
+                        />
+                      </svg>
+                      Choose Image
+                    </label>
+                    <p className="mt-2 text-xs text-center text-gray-500 dark:text-gray-400">
+                      Max size: 5MB
+                    </p>
+                  </div>
+                </div>
+              </div>
               <div>
                 <h5 className="mb-5 text-lg font-medium text-gray-800 dark:text-white/90 lg:mb-6">
                   Social Links
@@ -194,12 +333,20 @@ export default function UserMetaCard() {
                 <div className="grid grid-cols-1 gap-x-6 gap-y-5 lg:grid-cols-2">
                   <div className="col-span-2 lg:col-span-1">
                     <Label>First Name</Label>
-                    <Input type="text" defaultValue={isLoaded && user?.firstName ? user.firstName : ""} />
+                    <Input 
+                      type="text" 
+                      value={firstName}
+                      onChange={(e) => setFirstName(e.target.value)}
+                    />
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
                     <Label>Last Name</Label>
-                    <Input type="text" defaultValue={isLoaded && user?.lastName ? user.lastName : ""} />
+                    <Input 
+                      type="text" 
+                      value={lastName}
+                      onChange={(e) => setLastName(e.target.value)}
+                    />
                   </div>
 
                   <div className="col-span-2 lg:col-span-1">
@@ -220,11 +367,20 @@ export default function UserMetaCard() {
               </div>
             </div>
             <div className="flex items-center gap-3 px-2 mt-6 lg:justify-end">
-              <Button size="sm" variant="outline" onClick={closeModal}>
+              <Button 
+                size="sm" 
+                variant="outline" 
+                onClick={closeModal}
+                disabled={isSaving}
+              >
                 Close
               </Button>
-              <Button size="sm" onClick={handleSave}>
-                Save Changes
+              <Button 
+                size="sm" 
+                onClick={handleSave}
+                disabled={isSaving || !isLoaded}
+              >
+                {isSaving ? "Saving..." : "Save Changes"}
               </Button>
             </div>
           </form>

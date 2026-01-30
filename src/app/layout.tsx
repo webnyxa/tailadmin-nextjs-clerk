@@ -21,10 +21,10 @@ export default function RootLayout({
         className={`${outfit.className} dark:bg-gray-900`}
       >
         <ClerkProvider
-          signInUrl="/login"
-          signUpUrl="/signup"
-          afterSignInUrl="/"
-          afterSignUpUrl="/"
+          signInUrl={process.env.NEXT_PUBLIC_CLERK_SIGN_IN_URL || "/login"}
+          signUpUrl={process.env.NEXT_PUBLIC_CLERK_SIGN_UP_URL || "/signup"}
+          afterSignInUrl={process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL || "/"}
+          afterSignUpUrl={process.env.NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL || "/"}
         >
           <ThemeProvider>
             <SidebarProvider>{children}</SidebarProvider>
