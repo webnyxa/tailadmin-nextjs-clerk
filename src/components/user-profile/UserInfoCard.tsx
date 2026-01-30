@@ -23,6 +23,16 @@ export default function UserInfoCard() {
   const [isVerifying, setIsVerifying] = useState(false);
   const [emailBeingVerified, setEmailBeingVerified] = useState<string>(""); // Store email that code was sent to
   
+  // Custom profile data from Clerk metadata
+  const [bio, setBio] = useState("");
+  const [phone, setPhone] = useState("");
+  const [socialLinks, setSocialLinks] = useState({
+    facebook: "",
+    twitter: "",
+    linkedin: "",
+    instagram: "",
+  });
+  
   // Use reverification hook for sensitive email changes
   const changePrimaryEmail = useReverification((emailAddressId: string) =>
     user?.update({ primaryEmailAddressId: emailAddressId })
@@ -33,10 +43,31 @@ export default function UserInfoCard() {
       setFirstName(user.firstName || "");
       setLastName(user.lastName || "");
       setNewEmail(user.primaryEmailAddress?.emailAddress || "");
+      
+      // Load custom profile data from Clerk metadata
+      const metadata = (user.unsafeMetadata as {
+        bio?: string;
+        phone?: string;
+        socialLinks?: {
+          facebook?: string;
+          twitter?: string;
+          linkedin?: string;
+          instagram?: string;
+        };
+      }) || {};
+      
+      setBio(metadata.bio || "");
+      setPhone(metadata.phone || "");
+      setSocialLinks({
+        facebook: metadata.socialLinks?.facebook || "",
+        twitter: metadata.socialLinks?.twitter || "",
+        linkedin: metadata.socialLinks?.linkedin || "",
+        instagram: metadata.socialLinks?.instagram || "",
+      });
     }
   }, [isLoaded, user]);
 
-  // Reset email verification state when modal closes
+  // Reset email verification state and form fields when modal closes
   useEffect(() => {
     if (!isOpen) {
       setEmailStep("edit");
@@ -45,6 +76,29 @@ export default function UserInfoCard() {
       setVerificationCode("");
       setEmailBeingVerified("");
       setAlert(null);
+      
+      // Reset form fields to current metadata values
+      if (user) {
+        const metadata = (user.unsafeMetadata as {
+          bio?: string;
+          phone?: string;
+          socialLinks?: {
+            facebook?: string;
+            twitter?: string;
+            linkedin?: string;
+            instagram?: string;
+          };
+        }) || {};
+        
+        setBio(metadata.bio || "");
+        setPhone(metadata.phone || "");
+        setSocialLinks({
+          facebook: metadata.socialLinks?.facebook || "",
+          twitter: metadata.socialLinks?.twitter || "",
+          linkedin: metadata.socialLinks?.linkedin || "",
+          instagram: metadata.socialLinks?.instagram || "",
+        });
+      }
     }
   }, [isOpen, user]);
 
@@ -57,9 +111,11 @@ export default function UserInfoCard() {
     const emailValue = newEmail.trim();
     const currentEmail = user.primaryEmailAddress?.emailAddress || "";
 
+    // Validate email format FIRST - before any API calls
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(emailValue)) {
       setAlert({ variant: "error", message: "Please enter a valid email address." });
+      setIsSendingCode(false);
       return;
     }
 
@@ -99,8 +155,67 @@ export default function UserInfoCard() {
       });
     } catch (error: any) {
       console.error("Error sending verification code:", error);
-      const errorMessage = error?.errors?.[0]?.message || error?.message || "Failed to send verification code. Please try again.";
-      setAlert({ variant: "error", message: errorMessage });
+      console.log("Full error object:", JSON.stringify(error, null, 2));
+      console.log("Error.errors:", error?.errors);
+      console.log("Error.errors[0]:", error?.errors?.[0]);
+      console.log("Error.errors[0].errors:", error?.errors?.[0]?.errors);
+      
+      // Extract long_message from nested error structure
+      // Clerk API response structure: { errors: [{ message, long_message, errors: [{ message, long_message }] }] }
+      let longMessage = null;
+      let errorMessage = null;
+      
+      // Method 1: Check nested errors array first (most specific - from network response)
+      if (error?.errors?.[0]?.errors && Array.isArray(error.errors[0].errors) && error.errors[0].errors.length > 0) {
+        const nestedError = error.errors[0].errors[0];
+        longMessage = nestedError?.long_message;
+        errorMessage = nestedError?.message;
+        console.log("Found nested error - longMessage:", longMessage, "errorMessage:", errorMessage);
+      }
+      
+      // Method 2: Check top level errors array
+      if (!longMessage && error?.errors && Array.isArray(error.errors) && error.errors.length > 0) {
+        const firstError = error.errors[0];
+        longMessage = firstError?.long_message;
+        errorMessage = firstError?.message;
+        console.log("Found top level error - longMessage:", longMessage, "errorMessage:", errorMessage);
+      }
+      
+      // Method 3: Check direct error properties (for SDK wrapped errors)
+      if (!longMessage) {
+        longMessage = error?.long_message;
+        errorMessage = error?.message;
+        console.log("Found direct error - longMessage:", longMessage, "errorMessage:", errorMessage);
+      }
+      
+      // Method 4: Check error.data (some SDKs wrap response in data)
+      if (!longMessage && error?.data?.errors?.[0]) {
+        const dataError = error.data.errors[0];
+        longMessage = dataError?.long_message || dataError?.errors?.[0]?.long_message;
+        errorMessage = dataError?.message || dataError?.errors?.[0]?.message;
+        console.log("Found data error - longMessage:", longMessage, "errorMessage:", errorMessage);
+      }
+      
+      // ALWAYS prioritize long_message over message
+      const finalMessage = longMessage || errorMessage || "Failed to send verification code. Please try again.";
+      console.log("Final message selected:", finalMessage);
+      
+      // Clean up error message - remove "Clerk:" prefix and code if present
+      let cleanMessage = finalMessage.replace(/^Clerk:\s*/i, "").replace(/\(code="[^"]+"\)/g, "").trim();
+      
+      // For invalid email errors, ALWAYS use long_message if available
+      const lowerError = cleanMessage.toLowerCase();
+      if (lowerError.includes("invalid") || lowerError.includes("must be a valid") || lowerError === "is invalid") {
+        // If we have longMessage, use it; otherwise use the clean message
+        const displayMessage = longMessage ? longMessage.replace(/^Clerk:\s*/i, "").replace(/\(code="[^"]+"\)/g, "").trim() : cleanMessage;
+        console.log("Setting invalid email error - displayMessage:", displayMessage);
+        setAlert({ variant: "error", message: displayMessage || "Please enter a valid email address." });
+      } else if (lowerError.includes("reverification") && !lowerError.includes("invalid")) {
+        // Only show reverification if it's not an invalid email
+        setAlert({ variant: "error", message: "Security verification required. Please sign out and sign in again, then try changing your email." });
+      } else {
+        setAlert({ variant: "error", message: cleanMessage });
+      }
     } finally {
       setIsSendingCode(false);
     }
@@ -122,15 +237,22 @@ export default function UserInfoCard() {
         throw new Error("Email address not found. Please try again.");
       }
 
+      // 1. Verify email with OTP code - this is mandatory
+      // Only proceed if verification is successful
+      let verificationSuccessful = false;
+      
       try {
         await emailAddress.attemptVerification({ code: verificationCode.trim() });
+        verificationSuccessful = true;
       } catch (verifyError: any) {
-        const errorMessage = verifyError?.errors?.[0]?.message || verifyError?.message || "";
+        const errorObj = verifyError?.errors?.[0] || verifyError;
+        const errorMessage = errorObj?.long_message || errorObj?.message || verifyError?.message || "";
         const lowerErrorMessage = errorMessage.toLowerCase();
         
         // Check if error is "already verified" - email is already verified, skip verification
         if (lowerErrorMessage.includes("already verified")) {
           console.log("Email is already verified, setting as primary directly");
+          verificationSuccessful = true;
         } 
         // Check if error is "reverification required" - user needs to reverify their session
         else if (lowerErrorMessage.includes("reverification required") || lowerErrorMessage.includes("reverification")) {
@@ -141,20 +263,74 @@ export default function UserInfoCard() {
           setIsVerifying(false);
           return;
         } else {
-          // Some other verification error, throw it
-          throw verifyError;
+          // Wrong OTP or other verification error - show proper error message and STOP
+          let displayMessage = errorObj?.long_message || errorMessage || "Invalid verification code. Please check the code and try again.";
+          
+          // Clean up error message
+          displayMessage = displayMessage.replace(/^Clerk:\s*/i, "").replace(/\(code="[^"]+"\)/g, "").trim();
+          
+          // Show user-friendly message
+          if (displayMessage.toLowerCase().includes("invalid") || displayMessage.toLowerCase().includes("incorrect") || displayMessage.toLowerCase().includes("wrong")) {
+            displayMessage = "Invalid verification code. Please check the code and try again.";
+          }
+          
+          setAlert({ 
+            variant: "error", 
+            message: displayMessage 
+          });
+          setIsVerifying(false);
+          return; // STOP - don't proceed if verification failed
         }
+      }
+
+      // Double check - only proceed if verification was successful
+      if (!verificationSuccessful) {
+        setAlert({ 
+          variant: "error", 
+          message: "Email verification failed. Please try again." 
+        });
+        setIsVerifying(false);
+        return;
       }
 
       // Set as primary email using reverification wrapper
       // This handles reverification automatically when required
-      if (changePrimaryEmail) {
-        await changePrimaryEmail(emailAddress.id);
-      } else {
-        // Fallback if reverification hook is not available
-        await user.update({
-          primaryEmailAddressId: emailAddress.id,
-        });
+      try {
+        if (changePrimaryEmail) {
+          await changePrimaryEmail(emailAddress.id);
+        } else {
+          // Fallback if reverification hook is not available
+          await user.update({
+            primaryEmailAddressId: emailAddress.id,
+          });
+        }
+      } catch (reverificationError: any) {
+        // Handle reverification cancellation or errors
+        const revErrorObj = reverificationError?.errors?.[0] || reverificationError;
+        const revErrorMessage = revErrorObj?.long_message || revErrorObj?.message || reverificationError?.message || "";
+        
+        // Check if user cancelled reverification
+        if (revErrorMessage.includes("cancelled") || revErrorMessage.includes("reverification_cancelled")) {
+          setAlert({ 
+            variant: "error", 
+            message: "Verification was cancelled. Please try again." 
+          });
+          setIsVerifying(false);
+          return;
+        }
+        
+        // Check if reverification required
+        if (revErrorMessage.toLowerCase().includes("reverification required") || revErrorMessage.toLowerCase().includes("reverification")) {
+          setAlert({ 
+            variant: "error", 
+            message: "Security verification required. Please sign out and sign in again, then try changing your email." 
+          });
+          setIsVerifying(false);
+          return;
+        }
+        
+        // Other errors
+        throw reverificationError;
       }
 
       const oldPrimaryEmail = user.primaryEmailAddress;
@@ -181,12 +357,29 @@ export default function UserInfoCard() {
       setTimeout(() => {
         closeModal();
         setAlert(null);
-        window.location.reload();
+        setEmailStep("edit");
+        setVerificationCode("");
+        setEmailId(null);
+        setEmailBeingVerified("");
+        // No reload needed - user.reload() already updates the data
       }, 2000);
     } catch (error: any) {
       console.error("Error verifying email:", error);
-      const errorMessage = error?.errors?.[0]?.message || error?.message || "Invalid verification code. Please try again.";
-      setAlert({ variant: "error", message: errorMessage });
+      // Use long_message if available, otherwise fallback to message
+      const errorObj = error?.errors?.[0] || error;
+      let errorMessage = errorObj?.long_message || errorObj?.message || error?.message || "Invalid verification code. Please try again.";
+      
+      // Clean up error message - remove "Clerk:" prefix and code if present
+      errorMessage = errorMessage.replace(/^Clerk:\s*/i, "").replace(/\(code="[^"]+"\)/g, "").trim();
+      
+      // Show user-friendly message
+      if (errorMessage.toLowerCase().includes("cancelled")) {
+        setAlert({ variant: "error", message: "Verification was cancelled. Please try again." });
+      } else if (errorMessage.toLowerCase().includes("invalid") || errorMessage.toLowerCase().includes("incorrect")) {
+        setAlert({ variant: "error", message: "Invalid verification code. Please check the code and try again." });
+      } else {
+        setAlert({ variant: "error", message: errorMessage });
+      }
     } finally {
       setIsVerifying(false);
     }
@@ -209,7 +402,9 @@ export default function UserInfoCard() {
       }
     } catch (error: any) {
       console.error("Error resending code:", error);
-      const errorMessage = error?.errors?.[0]?.message || error?.message || "Failed to resend code. Please try again.";
+      // Use long_message if available, otherwise fallback to message
+      const errorObj = error?.errors?.[0] || error;
+      const errorMessage = errorObj?.long_message || errorObj?.message || error?.message || "Failed to resend code. Please try again.";
       setAlert({ variant: "error", message: errorMessage });
     } finally {
       setIsSendingCode(false);
@@ -250,12 +445,31 @@ export default function UserInfoCard() {
         lastName: lastNameValue || undefined,
       });
 
+      // Update custom profile data in Clerk metadata
+      const currentMetadata = (user.unsafeMetadata as Record<string, any>) || {};
+      await user.update({
+        unsafeMetadata: {
+          ...currentMetadata,
+          bio: bio.trim() || undefined,
+          phone: phone.trim() || undefined,
+          socialLinks: {
+            facebook: socialLinks.facebook.trim() || undefined,
+            twitter: socialLinks.twitter.trim() || undefined,
+            linkedin: socialLinks.linkedin.trim() || undefined,
+            instagram: socialLinks.instagram.trim() || undefined,
+          },
+        },
+      });
+
+      // Reload user to sync metadata changes
+      await user.reload();
+
       setAlert({ variant: "success", message: "Profile updated successfully!" });
       
       setTimeout(() => {
         closeModal();
         setAlert(null);
-        window.location.reload();
+        // No reload needed - user.reload() already updates the data
       }, 1500);
     } catch (error: any) {
       console.error("Error updating profile:", error);
@@ -307,7 +521,7 @@ export default function UserInfoCard() {
                 Phone
               </p>
               <p className="text-sm font-medium text-gray-800 dark:text-white/90">
-                +09 363 398 46
+                {isLoaded && phone ? phone : "—"}
               </p>
             </div>
 
@@ -316,7 +530,7 @@ export default function UserInfoCard() {
                 Bio
               </p>
               <p className="text-sm font-medium text-gray-800 dark:text-white/90">
-                Team Manager
+                {isLoaded && bio ? bio : "—"}
               </p>
             </div>
           </div>
@@ -345,7 +559,14 @@ export default function UserInfoCard() {
         </button>
       </div>
 
-      <Modal isOpen={isOpen} onClose={closeModal} className="max-w-[700px] m-4">
+      <Modal 
+        isOpen={isOpen} 
+        onClose={() => {
+          setAlert(null); // Clear any error messages when closing
+          closeModal();
+        }} 
+        className="max-w-[700px] m-4"
+      >
         <div className="no-scrollbar relative w-full max-w-[700px] overflow-y-auto rounded-3xl bg-white p-4 dark:bg-gray-900 lg:p-11">
           <div className="px-2 pr-14">
             <h4 className="mb-2 text-2xl font-semibold text-gray-800 dark:text-white/90">
@@ -377,20 +598,29 @@ export default function UserInfoCard() {
                     <Label>Facebook</Label>
                     <Input
                       type="text"
-                      defaultValue="https://www.facebook.com/PimjoHQ"
+                      value={socialLinks.facebook}
+                      onChange={(e) => setSocialLinks({ ...socialLinks, facebook: e.target.value })}
+                      placeholder="https://www.facebook.com/yourprofile"
                     />
                   </div>
 
                   <div>
                     <Label>X.com</Label>
-                    <Input type="text" defaultValue="https://x.com/PimjoHQ" />
+                    <Input 
+                      type="text" 
+                      value={socialLinks.twitter}
+                      onChange={(e) => setSocialLinks({ ...socialLinks, twitter: e.target.value })}
+                      placeholder="https://x.com/yourprofile"
+                    />
                   </div>
 
                   <div>
                     <Label>Linkedin</Label>
                     <Input
                       type="text"
-                      defaultValue="https://www.linkedin.com/company/pimjo"
+                      value={socialLinks.linkedin}
+                      onChange={(e) => setSocialLinks({ ...socialLinks, linkedin: e.target.value })}
+                      placeholder="https://www.linkedin.com/in/yourprofile"
                     />
                   </div>
 
@@ -398,7 +628,9 @@ export default function UserInfoCard() {
                     <Label>Instagram</Label>
                     <Input
                       type="text"
-                      defaultValue="https://instagram.com/PimjoHQ"
+                      value={socialLinks.instagram}
+                      onChange={(e) => setSocialLinks({ ...socialLinks, instagram: e.target.value })}
+                      placeholder="https://instagram.com/yourprofile"
                     />
                   </div>
                 </div>
@@ -498,12 +730,22 @@ export default function UserInfoCard() {
 
                   <div className="col-span-2 lg:col-span-1">
                     <Label>Phone</Label>
-                    <Input type="text" defaultValue="+09 363 398 46" />
+                    <Input 
+                      type="text" 
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="+1 234 567 8900"
+                    />
                   </div>
 
                   <div className="col-span-2">
                     <Label>Bio</Label>
-                    <Input type="text" defaultValue="Team Manager" />
+                    <Input 
+                      type="text" 
+                      value={bio}
+                      onChange={(e) => setBio(e.target.value)}
+                      placeholder="Tell us about yourself"
+                    />
                   </div>
                 </div>
               </div>

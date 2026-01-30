@@ -1,17 +1,102 @@
 "use client";
-import React from "react";
+import React, { useState, useEffect } from "react";
+import { useUser } from "@clerk/nextjs";
 import { useModal } from "../../hooks/useModal";
 import { Modal } from "../ui/modal";
 import Button from "../ui/button/Button";
 import Input from "../form/input/InputField";
 import Label from "../form/Label";
+import Alert from "../ui/alert/Alert";
 
 export default function UserAddressCard() {
+  const { isLoaded, user } = useUser();
   const { isOpen, openModal, closeModal } = useModal();
-  const handleSave = () => {
-    // Handle save logic here
-    console.log("Saving changes...");
-    closeModal();
+  const [isSaving, setIsSaving] = useState(false);
+  const [alert, setAlert] = useState<{ variant: "success" | "error"; message: string } | null>(null);
+  
+  // Address fields from Clerk metadata
+  const [country, setCountry] = useState("");
+  const [cityState, setCityState] = useState("");
+  const [postalCode, setPostalCode] = useState("");
+  const [taxId, setTaxId] = useState("");
+
+  useEffect(() => {
+    if (isLoaded && user) {
+      // Load address data from Clerk metadata (using addressDetails to avoid conflict with UserMetaCard's address string)
+      const metadata = (user.unsafeMetadata as {
+        addressDetails?: {
+          country?: string;
+          cityState?: string;
+          postalCode?: string;
+          taxId?: string;
+        };
+      }) || {};
+      
+      setCountry(metadata.addressDetails?.country || "");
+      setCityState(metadata.addressDetails?.cityState || "");
+      setPostalCode(metadata.addressDetails?.postalCode || "");
+      setTaxId(metadata.addressDetails?.taxId || "");
+    }
+  }, [isLoaded, user]);
+
+  // Reset form fields when modal closes
+  useEffect(() => {
+    if (!isOpen && user) {
+      const metadata = (user.unsafeMetadata as {
+        addressDetails?: {
+          country?: string;
+          cityState?: string;
+          postalCode?: string;
+          taxId?: string;
+        };
+      }) || {};
+      
+      setCountry(metadata.addressDetails?.country || "");
+      setCityState(metadata.addressDetails?.cityState || "");
+      setPostalCode(metadata.addressDetails?.postalCode || "");
+      setTaxId(metadata.addressDetails?.taxId || "");
+      setAlert(null);
+    }
+  }, [isOpen, user]);
+
+  const handleSave = async () => {
+    if (!user || !isLoaded) return;
+
+    setIsSaving(true);
+    setAlert(null);
+
+    try {
+      // Update address data in Clerk metadata (using addressDetails to avoid conflict with UserMetaCard's address string)
+      const currentMetadata = (user.unsafeMetadata as Record<string, any>) || {};
+      await user.update({
+        unsafeMetadata: {
+          ...currentMetadata,
+          addressDetails: {
+            country: country.trim() || undefined,
+            cityState: cityState.trim() || undefined,
+            postalCode: postalCode.trim() || undefined,
+            taxId: taxId.trim() || undefined,
+          },
+        },
+      });
+
+      // Reload user to sync metadata changes
+      await user.reload();
+
+      setAlert({ variant: "success", message: "Address updated successfully!" });
+      
+      setTimeout(() => {
+        closeModal();
+        setAlert(null);
+      }, 1500);
+    } catch (error: any) {
+      console.error("Error updating address:", error);
+      setAlert({
+        variant: "error",
+        message: error?.errors?.[0]?.message || "Failed to update address. Please try again.",
+      });
+      setIsSaving(false);
+    }
   };
   return (
     <>
@@ -28,7 +113,7 @@ export default function UserAddressCard() {
                   Country
                 </p>
                 <p className="text-sm font-medium text-gray-800 dark:text-white/90">
-                  United States
+                  {isLoaded && country ? country : "—"}
                 </p>
               </div>
 
@@ -37,7 +122,7 @@ export default function UserAddressCard() {
                   City/State
                 </p>
                 <p className="text-sm font-medium text-gray-800 dark:text-white/90">
-                  Phoenix, Arizona, United States.
+                  {isLoaded && cityState ? cityState : "—"}
                 </p>
               </div>
 
@@ -46,7 +131,7 @@ export default function UserAddressCard() {
                   Postal Code
                 </p>
                 <p className="text-sm font-medium text-gray-800 dark:text-white/90">
-                  ERT 2489
+                  {isLoaded && postalCode ? postalCode : "—"}
                 </p>
               </div>
 
@@ -55,7 +140,7 @@ export default function UserAddressCard() {
                   TAX ID
                 </p>
                 <p className="text-sm font-medium text-gray-800 dark:text-white/90">
-                  AS4568384
+                  {isLoaded && taxId ? taxId : "—"}
                 </p>
               </div>
             </div>
@@ -84,7 +169,14 @@ export default function UserAddressCard() {
           </button>
         </div>
       </div>
-      <Modal isOpen={isOpen} onClose={closeModal} className="max-w-[700px] m-4">
+      <Modal 
+        isOpen={isOpen} 
+        onClose={() => {
+          setAlert(null);
+          closeModal();
+        }} 
+        className="max-w-[700px] m-4"
+      >
         <div className="relative w-full p-4 overflow-y-auto bg-white no-scrollbar rounded-3xl dark:bg-gray-900 lg:p-11">
           <div className="px-2 pr-14">
             <h4 className="mb-2 text-2xl font-semibold text-gray-800 dark:text-white/90">
@@ -94,36 +186,75 @@ export default function UserAddressCard() {
               Update your details to keep your profile up-to-date.
             </p>
           </div>
+          {alert && (
+            <div className="mb-4 px-2">
+              <Alert
+                variant={alert.variant}
+                title={alert.variant === "success" ? "Success" : "Error"}
+                message={alert.message}
+                showLink={false}
+              />
+            </div>
+          )}
           <form className="flex flex-col">
             <div className="px-2 overflow-y-auto custom-scrollbar">
               <div className="grid grid-cols-1 gap-x-6 gap-y-5 lg:grid-cols-2">
                 <div>
                   <Label>Country</Label>
-                  <Input type="text" defaultValue="United States" />
+                  <Input 
+                    type="text" 
+                    value={country}
+                    onChange={(e) => setCountry(e.target.value)}
+                    placeholder="United States"
+                  />
                 </div>
 
                 <div>
                   <Label>City/State</Label>
-                  <Input type="text" defaultValue="Arizona, United States." />
+                  <Input 
+                    type="text" 
+                    value={cityState}
+                    onChange={(e) => setCityState(e.target.value)}
+                    placeholder="City, State"
+                  />
                 </div>
 
                 <div>
                   <Label>Postal Code</Label>
-                  <Input type="text" defaultValue="ERT 2489" />
+                  <Input 
+                    type="text" 
+                    value={postalCode}
+                    onChange={(e) => setPostalCode(e.target.value)}
+                    placeholder="12345"
+                  />
                 </div>
 
                 <div>
                   <Label>TAX ID</Label>
-                  <Input type="text" defaultValue="AS4568384" />
+                  <Input 
+                    type="text" 
+                    value={taxId}
+                    onChange={(e) => setTaxId(e.target.value)}
+                    placeholder="TAX ID"
+                  />
                 </div>
               </div>
             </div>
             <div className="flex items-center gap-3 px-2 mt-6 lg:justify-end">
-              <Button size="sm" variant="outline" onClick={closeModal}>
+              <Button 
+                size="sm" 
+                variant="outline" 
+                onClick={closeModal}
+                disabled={isSaving}
+              >
                 Close
               </Button>
-              <Button size="sm" onClick={handleSave}>
-                Save Changes
+              <Button 
+                size="sm" 
+                onClick={handleSave}
+                disabled={isSaving || !isLoaded}
+              >
+                {isSaving ? "Saving..." : "Save Changes"}
               </Button>
             </div>
           </form>

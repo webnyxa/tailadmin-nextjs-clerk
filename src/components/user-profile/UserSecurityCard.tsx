@@ -61,6 +61,14 @@ export default function UserSecurityCard() {
     }
   };
 
+  // Fetch sessions when component loads (user is available)
+  useEffect(() => {
+    if (isLoaded && user) {
+      fetchSessions();
+    }
+  }, [isLoaded, user]);
+
+  // Refresh sessions when modal opens
   useEffect(() => {
     if (isSessionsModalOpen && user) {
       // Fetch sessions when modal opens
