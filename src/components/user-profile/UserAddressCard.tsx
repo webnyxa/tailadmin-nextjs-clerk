@@ -14,7 +14,7 @@ export default function UserAddressCard() {
   const [isSaving, setIsSaving] = useState(false);
   const [alert, setAlert] = useState<{ variant: "success" | "error"; message: string } | null>(null);
   
-  // Address fields from Clerk metadata
+  
   const [country, setCountry] = useState("");
   const [cityState, setCityState] = useState("");
   const [postalCode, setPostalCode] = useState("");
