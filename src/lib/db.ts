@@ -10,13 +10,27 @@ export interface ShortLink {
   clickCount: number;
 }
 
-const DB_FILE = join(process.cwd(), 'data', 'shortlinks.json');
+// Use /tmp for Vercel (writable), otherwise use project data directory
+const getDBPath = () => {
+  // Check if we're on Vercel or in a serverless environment
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    // Use /tmp which is writable in serverless environments
+    return '/tmp/shortlinks.json';
+  }
+  // Local development - use project directory
+  return join(process.cwd(), 'data', 'shortlinks.json');
+};
 
-// Ensure data directory exists
+const DB_FILE = getDBPath();
+
+// Ensure data directory exists (only needed for local development)
 function ensureDataDir() {
-  const dataDir = join(process.cwd(), 'data');
-  if (!existsSync(dataDir)) {
-    mkdirSync(dataDir, { recursive: true });
+  // Only create directory if not using /tmp
+  if (!DB_FILE.startsWith('/tmp')) {
+    const dataDir = join(process.cwd(), 'data');
+    if (!existsSync(dataDir)) {
+      mkdirSync(dataDir, { recursive: true });
+    }
   }
 }
 
