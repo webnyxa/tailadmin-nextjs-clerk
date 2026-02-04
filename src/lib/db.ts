@@ -10,11 +10,20 @@ export interface ShortLink {
   clickCount: number;
 }
 
+// In-memory storage for serverless environments (shared across function invocations in same process)
+// Note: This is a temporary solution. For production, use a database (Vercel KV, Postgres, etc.)
+// Using global to persist across function invocations in the same Node.js process
+declare global {
+  var __shortLinksDB: ShortLink[] | undefined;
+}
+
 // Use /tmp for Vercel (writable), otherwise use project data directory
 const getDBPath = () => {
   // Check if we're on Vercel or in a serverless environment
   if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
     // Use /tmp which is writable in serverless environments
+    // Note: /tmp is ephemeral and not shared across function instances
+    // For production, use Vercel KV, Postgres, or another database
     return '/tmp/shortlinks.json';
   }
   // Local development - use project directory
@@ -22,6 +31,7 @@ const getDBPath = () => {
 };
 
 const DB_FILE = getDBPath();
+const IS_SERVERLESS = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
 
 // Ensure data directory exists (only needed for local development)
 function ensureDataDir() {
@@ -37,6 +47,28 @@ function ensureDataDir() {
 // Read database
 function readDB(): ShortLink[] {
   try {
+    // In serverless, use in-memory storage (persists across invocations in same process)
+    if (IS_SERVERLESS) {
+      if (!global.__shortLinksDB) {
+        // Try to load from /tmp first (in case it exists from previous invocation)
+        try {
+          if (existsSync(DB_FILE)) {
+            const data = readFileSync(DB_FILE, 'utf-8');
+            if (data && data.trim() !== '') {
+              global.__shortLinksDB = JSON.parse(data);
+            }
+          }
+        } catch (error) {
+          // File doesn't exist or can't be read, start with empty array
+        }
+        if (!global.__shortLinksDB) {
+          global.__shortLinksDB = [];
+        }
+      }
+      return global.__shortLinksDB;
+    }
+
+    // Local development - use file system
     ensureDataDir();
     if (!existsSync(DB_FILE)) {
       writeFileSync(DB_FILE, JSON.stringify([], null, 2));
@@ -55,8 +87,26 @@ function readDB(): ShortLink[] {
 
 // Write database
 function writeDB(data: ShortLink[]): void {
-  ensureDataDir();
-  writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+  try {
+    // In serverless, update in-memory storage
+    if (IS_SERVERLESS) {
+      global.__shortLinksDB = data;
+      // Also try to write to /tmp (may fail if different instance, but worth trying)
+      try {
+        writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+      } catch (error) {
+        // Ignore file write errors in serverless - in-memory is primary
+        console.warn('Could not write to /tmp, using in-memory storage only');
+      }
+      return;
+    }
+
+    // Local development - use file system
+    ensureDataDir();
+    writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('Error writing database:', error);
+  }
 }
 
 // Generate a random short code
