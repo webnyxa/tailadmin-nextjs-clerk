@@ -1,5 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { Redis } from '@upstash/redis';
 
 export interface ShortLink {
   id: string;
@@ -10,102 +9,59 @@ export interface ShortLink {
   clickCount: number;
 }
 
-// In-memory storage for serverless environments (shared across function invocations in same process)
-// Note: This is a temporary solution. For production, use a database (Vercel KV, Postgres, etc.)
-// Using global to persist across function invocations in the same Node.js process
-declare global {
-  var __shortLinksDB: ShortLink[] | undefined;
-}
-
-// Use /tmp for Vercel (writable), otherwise use project data directory
-const getDBPath = () => {
-  // Check if we're on Vercel or in a serverless environment
-  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
-    // Use /tmp which is writable in serverless environments
-    // Note: /tmp is ephemeral and not shared across function instances
-    // For production, use Vercel KV, Postgres, or another database
-    return '/tmp/shortlinks.json';
+// Initialize Redis client
+// Uses environment variables from Vercel: REDIS_URL or KV_REST_API_URL + KV_REST_API_TOKEN
+const getRedisClient = () => {
+  // Check if we have Redis environment variables (Vercel/Upstash)
+  if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
+    // Use KV_REST_API_URL and KV_REST_API_TOKEN (Vercel naming for Upstash)
+    return new Redis({
+      url: process.env.KV_REST_API_URL,
+      token: process.env.KV_REST_API_TOKEN,
+    });
   }
-  // Local development - use project directory
-  return join(process.cwd(), 'data', 'shortlinks.json');
+  // Fallback: try REDIS_URL if available
+  if (process.env.REDIS_URL && process.env.KV_REST_API_TOKEN) {
+    return new Redis({
+      url: process.env.REDIS_URL,
+      token: process.env.KV_REST_API_TOKEN,
+    });
+  }
+  return null;
 };
 
-const DB_FILE = getDBPath();
-const IS_SERVERLESS = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+const redis = getRedisClient();
+const DB_KEY = 'shortlinks:all'; // Redis key to store all short links
 
-// Ensure data directory exists (only needed for local development)
-function ensureDataDir() {
-  // Only create directory if not using /tmp
-  if (!DB_FILE.startsWith('/tmp')) {
-    const dataDir = join(process.cwd(), 'data');
-    if (!existsSync(dataDir)) {
-      mkdirSync(dataDir, { recursive: true });
-    }
-  }
-}
+// Check if Redis is available
+const isRedisAvailable = () => redis !== null;
 
-// Read database
-function readDB(): ShortLink[] {
-  try {
-    // In serverless, use in-memory storage (persists across invocations in same process)
-    if (IS_SERVERLESS) {
-      if (!global.__shortLinksDB) {
-        // Try to load from /tmp first (in case it exists from previous invocation)
-        try {
-          if (existsSync(DB_FILE)) {
-            const data = readFileSync(DB_FILE, 'utf-8');
-            if (data && data.trim() !== '') {
-              global.__shortLinksDB = JSON.parse(data);
-            }
-          }
-        } catch (error) {
-          // File doesn't exist or can't be read, start with empty array
-        }
-        if (!global.__shortLinksDB) {
-          global.__shortLinksDB = [];
-        }
-      }
-      return global.__shortLinksDB;
-    }
-
-    // Local development - use file system
-    ensureDataDir();
-    if (!existsSync(DB_FILE)) {
-      writeFileSync(DB_FILE, JSON.stringify([], null, 2));
+// Read database from Redis
+async function readDB(): Promise<ShortLink[]> {
+  if (isRedisAvailable()) {
+    try {
+      const data = await redis!.get<ShortLink[]>(DB_KEY);
+      return data || [];
+    } catch (error) {
+      console.error('Error reading from Redis:', error);
       return [];
     }
-    const data = readFileSync(DB_FILE, 'utf-8');
-    if (!data || data.trim() === '') {
-      return [];
-    }
-    return JSON.parse(data);
-  } catch (error) {
-    console.error('Error reading database:', error);
-    return [];
   }
+  // Fallback: return empty array if Redis not available
+  console.warn('Redis not available, returning empty array');
+  return [];
 }
 
-// Write database
-function writeDB(data: ShortLink[]): void {
-  try {
-    // In serverless, update in-memory storage
-    if (IS_SERVERLESS) {
-      global.__shortLinksDB = data;
-      // Also try to write to /tmp (may fail if different instance, but worth trying)
-      try {
-        writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-      } catch (error) {
-        // Ignore file write errors in serverless - in-memory is primary
-        console.warn('Could not write to /tmp, using in-memory storage only');
-      }
-      return;
+// Write database to Redis
+async function writeDB(data: ShortLink[]): Promise<void> {
+  if (isRedisAvailable()) {
+    try {
+      await redis!.set(DB_KEY, data);
+    } catch (error) {
+      console.error('Error writing to Redis:', error);
     }
-
-    // Local development - use file system
-    ensureDataDir();
-    writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error('Error writing database:', error);
+  } else {
+    console.warn('Redis not available, cannot write data');
   }
 }
 
@@ -120,14 +76,14 @@ function generateShortCode(length: number = 6): string {
 }
 
 // Check if short code exists
-function shortCodeExists(shortCode: string): boolean {
-  const links = readDB();
+async function shortCodeExists(shortCode: string): Promise<boolean> {
+  const links = await readDB();
   return links.some(link => link.shortCode === shortCode);
 }
 
 // Create a new short link
-export function createShortLink(originalUrl: string, userId?: string): ShortLink {
-  const links = readDB();
+export async function createShortLink(originalUrl: string, userId?: string): Promise<ShortLink> {
+  const links = await readDB();
   
   // Validate URL
   try {
@@ -145,7 +101,7 @@ export function createShortLink(originalUrl: string, userId?: string): ShortLink
     if (attempts > 10) {
       throw new Error('Failed to generate unique short code');
     }
-  } while (shortCodeExists(shortCode));
+  } while (await shortCodeExists(shortCode));
 
   const newLink: ShortLink = {
     id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
@@ -157,34 +113,34 @@ export function createShortLink(originalUrl: string, userId?: string): ShortLink
   };
 
   links.push(newLink);
-  writeDB(links);
+  await writeDB(links);
   return newLink;
 }
 
 // Get short link by short code
-export function getShortLinkByCode(shortCode: string): ShortLink | null {
+export async function getShortLinkByCode(shortCode: string): Promise<ShortLink | null> {
   if (!shortCode) {
     return null;
   }
   
-  const links = readDB();
+  const links = await readDB();
   // Case-insensitive lookup
   const link = links.find(l => l.shortCode.toLowerCase() === shortCode.toLowerCase());
   if (link) {
     // Increment click count
     link.clickCount++;
-    writeDB(links);
+    await writeDB(links);
   }
   return link || null;
 }
 
 // Get all short links with pagination
-export function getAllShortLinks(
+export async function getAllShortLinks(
   page: number = 1,
   limit: number = 10,
   userId?: string
-): { links: ShortLink[]; total: number; totalPages: number } {
-  const links = readDB();
+): Promise<{ links: ShortLink[]; total: number; totalPages: number }> {
+  const links = await readDB();
   
   // Filter by user if userId provided
   let filteredLinks = userId ? links.filter(l => l.userId === userId) : links;
@@ -206,8 +162,8 @@ export function getAllShortLinks(
 }
 
 // Delete a short link
-export function deleteShortLink(id: string, userId?: string): boolean {
-  const links = readDB();
+export async function deleteShortLink(id: string, userId?: string): Promise<boolean> {
+  const links = await readDB();
   const index = links.findIndex(l => l.id === id);
   
   if (index === -1) {
@@ -220,6 +176,6 @@ export function deleteShortLink(id: string, userId?: string): boolean {
   }
 
   links.splice(index, 1);
-  writeDB(links);
+  await writeDB(links);
   return true;
 }

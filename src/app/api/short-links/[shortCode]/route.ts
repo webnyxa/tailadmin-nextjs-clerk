@@ -16,7 +16,7 @@ export async function GET(
       );
     }
 
-    const shortLink = getShortLinkByCode(shortCode);
+    const shortLink = await getShortLinkByCode(shortCode);
 
     if (!shortLink) {
       return NextResponse.json(
