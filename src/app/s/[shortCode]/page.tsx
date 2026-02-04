@@ -26,7 +26,7 @@ export default async function ShortLinkRedirect({
   }
 
   // Get the short link from database
-  const shortLink = getShortLinkByCode(shortCode);
+  const shortLink = await getShortLinkByCode(shortCode);
 
   if (!shortLink) {
     return (

@@ -27,7 +27,7 @@ export async function POST(request: Request) {
       originalUrl = 'https://' + originalUrl;
     }
 
-    const shortLink = createShortLink(originalUrl, userId);
+    const shortLink = await createShortLink(originalUrl, userId);
 
     return NextResponse.json(shortLink, { status: 201 });
   } catch (error: any) {
@@ -52,7 +52,7 @@ export async function GET(request: Request) {
     const page = parseInt(searchParams.get('page') || '1', 10);
     const limit = parseInt(searchParams.get('limit') || '10', 10);
 
-    const result = getAllShortLinks(page, limit, userId);
+    const result = await getAllShortLinks(page, limit, userId);
 
     return NextResponse.json(result);
   } catch (error: any) {
