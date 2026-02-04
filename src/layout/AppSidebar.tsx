@@ -16,6 +16,7 @@ import {
   PlugInIcon,
   TableIcon,
   UserCircleIcon,
+  PaperPlaneIcon,
 } from "../icons/index";
 import SidebarWidget from "./SidebarWidget";
 
@@ -42,7 +43,14 @@ const navItems: NavItem[] = [
     name: "User Profile",
     path: "/profile",
   },
-
+  {
+    icon: <PaperPlaneIcon />,
+    name: "Short Links",
+    subItems: [
+      { name: "Shorten URL", path: "/shorten", pro: false },
+      { name: "All Links", path: "/short-links", pro: false },
+    ],
+  },
   {
     name: "Forms",
     icon: <ListIcon />,
