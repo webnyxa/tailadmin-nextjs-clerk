@@ -28,6 +28,13 @@ export default function UserMetaCard() {
   const [emailBeingVerified, setEmailBeingVerified] = useState<string>(""); // Store email that code was sent to
   const fileInputRef = useRef<HTMLInputElement>(null);
   
+  // Password setup/update state
+  const [showPasswordFields, setShowPasswordFields] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [hasPasswordAuth, setHasPasswordAuth] = useState(false);
+  
   // Custom profile data from Clerk metadata
   const [address, setAddress] = useState("");
   const [bio, setBio] = useState("");
@@ -50,6 +57,11 @@ export default function UserMetaCard() {
       setLastName(user.lastName || "");
       setEmail(user.primaryEmailAddress?.emailAddress || "");
       setNewEmail(user.primaryEmailAddress?.emailAddress || "");
+      
+      // Check if user has password authentication enabled
+      // Clerk exposes this via passwordEnabled property
+      const hasPassword = user.passwordEnabled || false;
+      setHasPasswordAuth(hasPassword);
       
       // Load custom profile data from Clerk metadata (using unsafeMetadata for client-side read/write)
       const metadata = (user.unsafeMetadata as {
@@ -90,6 +102,12 @@ export default function UserMetaCard() {
       setEmailBeingVerified("");
       setAlert(null);
       setImagePreview(null);
+      
+      // Reset password fields
+      setShowPasswordFields(false);
+      setNewPassword("");
+      setConfirmPassword("");
+      setCurrentPassword("");
       
       // Reset form fields to current metadata values
       if (user) {
@@ -401,15 +419,110 @@ export default function UserMetaCard() {
       // 4. Reload user to sync changes
       await user.reload();
 
+      // Handle password setup/update if password fields are filled
+      let passwordUpdated = false;
+      if (showPasswordFields && newPassword.trim()) {
+        // Validate password
+        if (newPassword.length < 8) {
+          setAlert({ 
+            variant: "error", 
+            message: "Password must be at least 8 characters long." 
+          });
+          setIsVerifying(false);
+          return;
+        }
+
+        if (newPassword !== confirmPassword) {
+          setAlert({ 
+            variant: "error", 
+            message: "Passwords do not match. Please try again." 
+          });
+          setIsVerifying(false);
+          return;
+        }
+
+        try {
+          if (hasPasswordAuth) {
+            // User has password - update it (requires current password)
+            if (!currentPassword.trim()) {
+              setAlert({ 
+                variant: "error", 
+                message: "Please enter your current password to update it." 
+              });
+              setIsVerifying(false);
+              return;
+            }
+
+            await user.updatePassword({
+              currentPassword: currentPassword.trim(),
+              newPassword: newPassword.trim(),
+            });
+            passwordUpdated = true;
+          } else {
+            // OAuth user - create new password (no current password needed)
+            // For OAuth users, we can use updatePassword with only newPassword
+            // Clerk allows this for users without existing passwords
+            await user.updatePassword({
+              newPassword: newPassword.trim(),
+            } as any); // Type assertion needed as Clerk types may not reflect this use case
+            passwordUpdated = true;
+            // Reload to update passwordEnabled status
+            await user.reload();
+            setHasPasswordAuth(true);
+          }
+        } catch (passwordError: any) {
+          const passwordErrorObj = passwordError?.errors?.[0] || passwordError;
+          const passwordErrorMessage = passwordErrorObj?.long_message || passwordErrorObj?.message || passwordError?.message || "";
+          
+          if (passwordErrorMessage.toLowerCase().includes("current password") || 
+              passwordErrorMessage.toLowerCase().includes("incorrect")) {
+            setAlert({ 
+              variant: "error", 
+              message: "Current password is incorrect. Please check and try again." 
+            });
+          } else if (passwordErrorMessage.toLowerCase().includes("reverification")) {
+            setAlert({ 
+              variant: "error", 
+              message: "Security verification required. Please sign out and sign in again, then try updating your password." 
+            });
+          } else {
+            setAlert({ 
+              variant: "error", 
+              message: passwordErrorMessage || "Failed to update password. Please try again." 
+            });
+          }
+          setIsVerifying(false);
+          return;
+        }
+      }
+
       // Update local state
       setEmail(user.primaryEmailAddress?.emailAddress || newEmail);
       setEmailStep("edit");
       setVerificationCode("");
       setEmailId(null);
 
+      // Clear password fields
+      setNewPassword("");
+      setConfirmPassword("");
+      setCurrentPassword("");
+      setShowPasswordFields(false);
+
+      // Show success message based on what was updated
+      let successMessage = "Email updated successfully!";
+      if (passwordUpdated) {
+        if (hasPasswordAuth) {
+          successMessage = "Email and password updated successfully! You can now log in with your new email and password.";
+        } else {
+          successMessage = "Email updated and password set successfully! You can now log in with your new email and password, or continue using Google.";
+        }
+      } else {
+        successMessage = "Email updated successfully! Your new email address is now active.";
+      }
+
       setAlert({ 
         variant: "success", 
-        message: "Email updated successfully! Your new email address is now active." 
+        message: successMessage
       });
 
       // Close modal after a short delay (no reload needed)
@@ -420,6 +533,10 @@ export default function UserMetaCard() {
         setVerificationCode("");
         setEmailId(null);
         setEmailBeingVerified("");
+        setNewPassword("");
+        setConfirmPassword("");
+        setCurrentPassword("");
+        setShowPasswordFields(false);
       }, 2000);
     } catch (error: any) {
       console.error("Error verifying email:", error);
@@ -907,6 +1024,66 @@ export default function UserMetaCard() {
                           >
                             ← Change email
                           </button>
+                        </div>
+                        
+                        {/* Optional Password Setup/Update Section */}
+                        <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-800">
+                          <div className="flex items-center justify-between mb-3">
+                            <div>
+                              <p className="text-sm font-medium text-gray-800 dark:text-white/90">
+                                {hasPasswordAuth ? "Update Password (Optional)" : "Set Password (Optional)"}
+                              </p>
+                              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                {hasPasswordAuth 
+                                  ? "Update your password to use with your new email address."
+                                  : "Set a password to log in with your new email address. You can still use Google to sign in."}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setShowPasswordFields(!showPasswordFields)}
+                              className="text-sm text-brand-500 hover:text-brand-600 dark:text-brand-400"
+                            >
+                              {showPasswordFields ? "Hide" : "Show"}
+                            </button>
+                          </div>
+                          
+                          {showPasswordFields && (
+                            <div className="space-y-3">
+                              {hasPasswordAuth && (
+                                <div>
+                                  <Label>Current Password</Label>
+                                  <Input
+                                    type="password"
+                                    value={currentPassword}
+                                    onChange={(e) => setCurrentPassword(e.target.value)}
+                                    placeholder="Enter current password"
+                                    disabled={isVerifying}
+                                  />
+                                </div>
+                              )}
+                              <div>
+                                <Label>New Password</Label>
+                                <Input
+                                  type="password"
+                                  value={newPassword}
+                                  onChange={(e) => setNewPassword(e.target.value)}
+                                  placeholder="Enter new password (min. 8 characters)"
+                                  disabled={isVerifying}
+                                />
+                              </div>
+                              <div>
+                                <Label>Confirm New Password</Label>
+                                <Input
+                                  type="password"
+                                  value={confirmPassword}
+                                  onChange={(e) => setConfirmPassword(e.target.value)}
+                                  placeholder="Confirm new password"
+                                  disabled={isVerifying}
+                                />
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}

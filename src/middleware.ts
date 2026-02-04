@@ -5,6 +5,7 @@ const isPublicRoute = createRouteMatcher([
   "/login(.*)",
   "/signup(.*)",
   "/signin(.*)", // keep existing template route working (we redirect it to /login)
+  "/s(.*)", // short links should be publicly accessible
 ]);
 
 export default clerkMiddleware(async (auth, req) => {
